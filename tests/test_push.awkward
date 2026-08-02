@@ -1,5 +1,5 @@
 let arr = [17];
-print("arr len before ", arr.len());
+print("arr len before", arr.len());
 let x = pop(arr);
 print("pop value x is " x);
 print("x type is " type(x));

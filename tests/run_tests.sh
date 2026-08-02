@@ -32,7 +32,11 @@ for src in test_*.awkward; do
     stdout_out=$(mktemp)
     stderr_out=$(mktemp)
 
-    "$AWKWARD" "$src" >"$stdout_out" 2>"$stderr_out"
+    if [ -f "$name.stdin" ]; then
+        "$AWKWARD" "$src" <"$name.stdin" >"$stdout_out" 2>"$stderr_out"
+    else
+        "$AWKWARD" "$src" </dev/null >"$stdout_out" 2>"$stderr_out"
+    fi
     exit_code=$?
 
     ok_stdout=true
@@ -53,6 +57,8 @@ for src in test_*.awkward; do
             diff -u "$name.stderr" "$stderr_out"
             ok_stderr=false
         fi
+    elif [ -f "$name.ignorestderr" ]; then
+        : # stderr
     else
         if [ -s "$stderr_out" ]; then
             echo "unexpected stderr output:"

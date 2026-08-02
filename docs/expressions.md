@@ -2,13 +2,16 @@
 
 ## `assignment`
 
-Assignment expression. The left-hand side must be an identifier or member expression.
+Assignment expression, including the compound forms '+=', '-=', '*=', '/='.
+The left-hand side must be an identifier or member expression.
 
 **Examples:**
 ```awkward
 x = 42;
 obj.field = "hello";
 arr[0] = 100;
+x += 1;
+total -= discount;
 ```
 
 ## `logical_or`
@@ -73,5 +76,17 @@ Multiplicative expression, supporting '*', '/', and '%' operators.
 let product = a * b;
 let quotient = x / y;
 let remainder = n % 3;
+```
+
+## `unary`
+
+Unary expression, supporting the '!' (logical not) and '-' (negation) prefix operators.
+
+**Examples:**
+```awkward
+let flag = !found;
+let neg = -x;
+let double_negated = !!flag;
+if (!ready) { print("not ready"); }
 ```
 

@@ -19,17 +19,17 @@ hi
 true
 false
 null
-array3
-010
-120
-230
+array 3
+0 10
+1 20
+2 30
 Spiderman
 36
 true
 2
-Pale Ale$5
-IPA$6
+Pale Ale $5
+IPA $6
 {"user":"Spiderman","tags":[1,2,3],"active":true}
-Spidermantrue3
+Spiderman true 3
 a
 b	c"d\eП

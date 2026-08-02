@@ -1,0 +1,17 @@
+let x = 5;
+x += 3;
+print(x);
+x -= 2;
+print(x);
+x *= 4;
+print(x);
+x /= 3;
+print(x);
+
+let arr = [10, 20, 30];
+arr[1] += 5;
+print(arr);
+
+let s = "a";
+s += "b";
+print(s);

@@ -1,0 +1,26 @@
+fn double(x) {
+    return x * 2;
+}
+
+fn quadruple(x) {
+    return double(double(x));
+}
+
+fn greet(name) {
+    print("Hello, " + name);
+    return name;
+}
+
+let items = [1, 2, 3, 4];
+let evens = filter(items, lambda x: x % 2 == 0);
+
+struct Point {
+  x;
+  y;
+};
+
+impl Point {
+  fn sum() {
+    return self.x + self.y;
+  }
+};

@@ -4,7 +4,7 @@
 <program> ::= <statement>*
 <statement> ::= <variable_declaration> | <if_statement> | <while_statement> | <for_statement> | <function_declaration> | <struct_declaration> | <impl_declaration> | <enum_declaration> | <return_statement> | <break_statement> | <continue_statement> | <try_statement> | <expression_statement> | ";"
 <variable_declaration> ::= "let" <identifier> ["=" <expression>] ";"
-<if_statement> ::= "if" "(" <expression> ")" <block> ["else" <block>]
+<if_statement> ::= "if" "(" <expression> ")" <block> ["else" (<if_statement> | <block>)]
 <while_statement> ::= "while" "(" <expression> ")" <block>
 <for_statement> ::= "for" "(" "let" <identifier> "in" <expression> ")" <block>
 <function_declaration> ::= "fn" <identifier> "(" [<identifier> ("," <identifier>)*] ")" <block>
@@ -17,14 +17,15 @@
 <try_statement> ::= "try" <block> "catch" <block> ["finally" <block>]
 <expression_statement> ::= <expression> [";"]
 <expression> ::= <assignment>
-<assignment> ::= <pipe_declaration> | <pipe_declaration> "=" <expression>
+<assignment> ::= <pipe_declaration> | <pipe_declaration> ("=" | "+=" | "-=" | "*=" | "/=") <expression>
 <pipe_declaration> ::= <logical_or> ("pipe" <logical_or>)*
 <logical_or> ::= <logical_and> ("||" <logical_and>)*
 <logical_and> ::= <equality> ("&&" <equality>)*
 <equality> ::= <relational> ("==" | "!=" <relational>)*
 <relational> ::= <additive> ("<" | ">" | "<=" | ">=" <additive>)*
 <additive> ::= <multiplicative> ("+" | "-" <multiplicative>)*
-<multiplicative> ::= <primary> ("*" | "/" | "%" <primary>)*
+<multiplicative> ::= <unary> ("*" | "/" | "%" <unary>)*
+<unary> ::= ("!" | "-") <unary> | <primary>
 <primary> ::= <literal> | <identifier> | "(" <expression> ")" | "[" <array_literal> "]" | "{" <object_literal> "}" | "lambda" <lambda_params> ":" <expression> | "new" <identifier> "{" <property_list> "}" | <call_expression> | <member_expression>
 <literal> ::= <number> | <string> | "true" | "false" | "null"
 <array_literal> ::= "[" [<expression> ("," <expression>)*] "]"

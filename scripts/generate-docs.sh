@@ -1,6 +1,16 @@
 #!/bin/bash
 
-SRC_FILE="./awkward"
+SRC_FILES=(
+    "./lib/core.awk"
+    "./lib/modules/math.awk"
+    "./lib/modules/system.awk"
+    "./lib/modules/io.awk"
+    "./lib/modules/fs.awk"
+    "./lib/modules/http.awk"
+    "./lib/modules/regex.awk"
+    "./lib/modules/kek.awk"
+    "./lib/modules/mysql.awk"
+)
 OUT_DIR="./docs"
 
 mkdir -p "$OUT_DIR"
@@ -70,4 +80,4 @@ while IFS= read -r line; do
         mode=""
     fi
 
-done < "$SRC_FILE"
+done < <(cat "${SRC_FILES[@]}")

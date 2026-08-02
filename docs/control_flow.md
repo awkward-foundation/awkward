@@ -54,7 +54,7 @@ return x + y; # return result
 
 ## `if_statement`
 
-if statement, including optional else branch.
+if statement, including optional else and chained else-if branches
 
 **Examples:**
 ```awkward
@@ -65,6 +65,13 @@ if (x > 0) {
 }
 if (y == 0) {
   return;
+}
+if (score >= 90) {
+  print("A");
+} else if (score >= 80) {
+  print("B");
+} else {
+  print("F");
 }
 ```
 

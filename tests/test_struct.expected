@@ -10,8 +10,8 @@ Final stock {name: Apple, price: 1000, quantity: 12}
 false
 []
 [1, 2, 3]
-data [1, 2, 3]
+data   [1, 2, 3]
 struct value is array
-struct data value by 0 is 1
-struct data value by 1 is 2
-struct data value by 2 is 3
+struct data value by  0  is  1
+struct data value by  1  is  2
+struct data value by  2  is  3

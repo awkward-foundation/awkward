@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-08-02
+
+### Added
+
+- unary `!` and `-` prefix operators
+- Built-in `regex` module (`match`, `find`, `replace`, `replace_all`, `split`)
+- `http.handle(handler)` handles one bodyless HTTP request (GET/HEAD/DELETE-style) read from stdinю Used an external listener (`socat TCP-LISTEN:PORT,reuseaddr,fork EXEC:"awkward server.awkward"`, or `nc`). No sockets are opened by awkward itself
+- Built-in `mysql` module: a real MySQL/MariaDB wire-protocol client
+- compound assignment operators `+=`, `-=`, `*=`, `/=`
+- `else if` chaining, e.g. `if (a) {} else if (b) {} else {}`, instead of requiring a nested `if` inside every `else` block
+
+### Changed
+
+- src moved from a single `awkward` file to `lib/core.awk` + `lib/modules/*.awk`
+- user modules (`import my_module`) now resolve against the installed lib dir (`$AWKWARD_LIBDIR`, passed through by the `awkward` launcher)
+- launcher forces `LC_ALL=C`
+- json `\uXXXX` escapes now encode via `utf8_encode()` instead of relying on `sprintf("%c", code)`
+
+### Fixed
+
+- User-defined modules (`import my_module`) could not call any builtin function (`print`, `assert`, `filter`, `map`, `reduce`, `range`, etc)
+- `function.call()` silently returned `null` instead of invoking the function when called on a lambda/closure
+- gc could sweep an object still referenced only by a closure's captured environment
+- gc could delete the very object it was in the middle of constructing
+- `print(a, b, ...)` never inserted the documented space separator between comma-separated arguments
+- `set_indexed_value` returned `create_object(TYPE_NULL, "null", 0)` instead of `create_value(TYPE_NULL, "null", 0)`
+- `get_object_property` checked the interpreter's own internal bookkeeping fields
+
 ## [0.1.2] - 2026-05-24
 
 ### Added

@@ -1,0 +1,8 @@
+import http;
+
+fn handle(req) {
+    print("handler was called - this should not happen for a body request");
+    return "unexpected";
+}
+
+http.handle(handle);

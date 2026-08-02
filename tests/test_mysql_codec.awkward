@@ -1,0 +1,16 @@
+import mysql;
+
+print(mysql.hex_encode(""));
+print(mysql.hex_encode("A"));
+print(mysql.hex_encode("hi!"));
+print(mysql.hex_encode("\0"));
+
+print(mysql.hex_decode(""));
+print(mysql.hex_decode("41"));
+print(mysql.hex_decode("686921"));
+
+print(mysql.hex_decode("412142") == "A!B");
+print(mysql.hex_decode(mysql.hex_encode("round trip")) == "round trip");
+print(mysql.hex_encode("hi!").upper() == "686921".upper());
+
+print(mysql.hex_decode("4A") == mysql.hex_decode("4a"));

@@ -1,6 +1,6 @@
 arr len before 1
-pop value x is 17
-x type is int
-len arr after is 0
-arr after append 22 is [22]
-arr after clear is []
+pop value x is  17
+x type is  int
+len arr after is  0
+arr after append 22 is  [22]
+arr after clear is  []

@@ -1,0 +1,16 @@
+fn grade(n) {
+    if (n >= 90) {
+        return "A";
+    } else if (n >= 80) {
+        return "B";
+    } else if (n >= 70) {
+        return "C";
+    } else {
+        return "F";
+    }
+}
+
+print(grade(95));
+print(grade(85));
+print(grade(72));
+print(grade(50));

@@ -1,0 +1,30 @@
+import mysql;
+
+let conn = mysql.connect("127.0.0.1", 3306, "root", "testdb");
+
+print("-- all tasks --");
+let rows = mysql.query(conn, "SELECT id, title, done FROM tasks ORDER BY id");
+let i = 0;
+while (i < len(rows)) {
+    print(rows[i].id, rows[i].title, rows[i].done);
+    i = i + 1;
+}
+
+let created = mysql.query(conn, "INSERT INTO tasks (title) VALUES ('exercise the driver')");
+print("affected_rows:", created.affected_rows, "last_insert_id:", created.last_insert_id);
+
+let updated = mysql.query(conn, "UPDATE tasks SET done=1 WHERE id=" + created.last_insert_id);
+print("affected_rows:", updated.affected_rows);
+
+let payload = "raw\nbytes\0here";
+let insert_sql = "INSERT INTO tasks (title) VALUES (UNHEX('" + mysql.hex_encode(payload) + "'))";
+mysql.query(conn, insert_sql);
+
+try {
+    mysql.query(conn, "SELECT * FROM no_such_table");
+} catch (e) {
+    print("caught:", e);
+}
+
+mysql.close(conn);
+print("done");

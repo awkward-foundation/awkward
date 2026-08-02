@@ -1,0 +1,28 @@
+import regex;
+
+print(type(regex));
+print(type(regex.match));
+print(type(regex.find));
+print(type(regex.replace));
+print(type(regex.replace_all));
+print(type(regex.split));
+
+print(regex.match("hello123", "[0-9]+"));
+print(regex.match("hello", "[0-9]+"));
+
+print(regex.find("hello123world456", "[0-9]+"));
+print(regex.find("no digits here", "[0-9]+"));
+
+print(regex.replace("hello123", "[0-9]+", "X"));
+print(regex.replace_all("a1b2c3", "[0-9]", "_"));
+
+let parts = regex.split("a, b,  c", "[, ]+");
+print(len(parts));
+for (let i in parts) {
+    print(parts[i]);
+}
+
+let email = "user@example.com";
+if (regex.match(email, "^[a-zA-Z0-9_.]+@[a-zA-Z0-9.]+$")) {
+    print("valid-looking email");
+}

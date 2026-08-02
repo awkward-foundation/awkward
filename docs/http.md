@@ -1,5 +1,21 @@
 # http
 
+## `http_handle`
+
+process under socat ...,fork. GET/HEAD/DELETE-style
+
+**Examples:**
+```awkward
+import http;
+fn handle(req) {
+  if (req.path == "/") {
+      return "hello";
+  }
+  return {"status" = 404, "body" = "not found"};
+}
+http.handle(handle);
+```
+
 ## `builtin_http`
 
 Built-in HTTP client (used curl)
