@@ -1,11 +1,11 @@
 
 function create_system_module(obj_id, fun_id, i) {
-    debug_msg("Creating system module")
+    if (debug) debug_msg("Creating system module")
     obj_id = create_object()
     objects[obj_id, "type"] = TYPE_STRUCT
     objects[obj_id, "struct_name"] = "system"
 
-    system_funcs = "user hostname datetime cwd getenv setenv"
+    system_funcs = "user hostname datetime cwd getenv setenv exec args"
     split(system_funcs, funcs, " ")
     objects[obj_id, "properties_count"] = length(funcs)
 
@@ -28,7 +28,7 @@ function create_system_module(obj_id, fun_id, i) {
 # system.datetime()  # returns the current date and time
 # system.cwd()  # returns the current working directory
 function builtin_system(func_name, args, argc,   parts, result, arg, arg_type, arg1_type, arg2_type) {
-    debug_msg("Executing builtin system function " func_name " with " argc " arguments")
+    if (debug) debug_msg("Executing builtin system function " func_name " with " argc " arguments")
     split(func_name, parts, ".")
     if (parts[2] == "user") {
         if (argc != 0) error("system.user expects no arguments")
@@ -57,6 +57,13 @@ function builtin_system(func_name, args, argc,   parts, result, arg, arg_type, a
         if (argc != 0) error("system.cwd expects no arguments")
         result = system_cwd()
         return create_value(TYPE_STRING, result)
+    } else if (parts[2] == "exec") {
+        if (argc != 1) error("system.exec expects 1 argument")
+        result = system_exec(value_to_string(args[1]))
+        return create_value(TYPE_STRING, result)
+    } else if (parts[2] == "args") {
+        if (argc != 0) error("system.args expects no arguments")
+        return system_args()
     }
     error("Unknown system function: " func_name)
 }
@@ -103,4 +110,22 @@ function system_cwd(cmd, cwd) {
     }
     close(cmd)
     return cwd
+}
+
+function system_exec(cmd,   line, out, first) {
+    out = ""
+    first = 1
+    while ((cmd | getline line) > 0) {
+        out = first ? line : out "\n" line
+        first = 0
+    }
+    close(cmd)
+    return out
+}
+
+function system_args(   i, elems) {
+    for (i = 1; i <= script_argc; i++) {
+        elems[i] = create_value(TYPE_STRING, SCRIPT_ARGV[i])
+    }
+    return create_array(elems, script_argc)
 }

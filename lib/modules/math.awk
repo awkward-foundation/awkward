@@ -1,11 +1,11 @@
 
 function create_math_module(obj_id, fun_id, i) {
-    debug_msg("Creating math module")
+    if (debug) debug_msg("Creating math module")
     obj_id = create_object()
     objects[obj_id, "type"] = TYPE_STRUCT
     objects[obj_id, "struct_name"] = "math"
 
-    math_funcs = "sin cos tan abs sqrt asin acos atan pow"
+    math_funcs = "sin cos tan abs sqrt asin acos atan pow log exp floor ceil round min max random"
     split(math_funcs, funcs, " ")
     objects[obj_id, "properties_count"] = length(funcs)
 
@@ -15,11 +15,17 @@ function create_math_module(obj_id, fun_id, i) {
         objects[obj_id, "prop_value_" i] = fun_id
     }
 
+    objects[obj_id, "properties_count"] = length(funcs) + 2
+    objects[obj_id, "prop_key_" (length(funcs) + 1)] = "PI"
+    objects[obj_id, "prop_value_" (length(funcs) + 1)] = create_value(TYPE_FLOAT, 3.14159265358979)
+    objects[obj_id, "prop_key_" (length(funcs) + 2)] = "E"
+    objects[obj_id, "prop_value_" (length(funcs) + 2)] = create_value(TYPE_FLOAT, 2.71828182845905)
+
     return obj_id
 }
 
 function call_math(func_name, arg, arg2,    result) {
-    debug_msg("call_math received func_name: '" func_name "' arg: " arg)
+    if (debug) debug_msg("call_math received func_name: '" func_name "' arg: " arg)
     if (func_name == "sin") {
         result = sin(arg)
     } else if (func_name == "cos") {
@@ -37,7 +43,11 @@ function call_math(func_name, arg, arg2,    result) {
     } else if (func_name == "atan") {
         result = math_atan(arg)
     } else if (func_name == "pow") {
-        result = math_pow(arg, arg2)        
+        result = math_pow(arg, arg2)
+    } else if (func_name == "log") {
+        result = log(arg)
+    } else if (func_name == "exp") {
+        result = exp(arg)
     } else {
         error("Unknown math function: " func_name)
     }
@@ -49,8 +59,8 @@ function call_math(func_name, arg, arg2,    result) {
 # examples:
 # math.sin(x)  # returns the sine of x (x in radians)
 # math.cos(x)  # returns the cosine of x (x in radians)
-function builtin_math(func_name, args, argc,   parts, result, arg, arg_type, arg1_type, arg2_type) {
-    debug_msg("Executing builtin math function " func_name " with " argc " arguments")
+function builtin_math(func_name, args, argc,   parts, result, arg, arg_type, arg1_type, arg2_type, v1, v2, winner) {
+    if (debug) debug_msg("Executing builtin math function " func_name " with " argc " arguments")
     split(func_name, parts, ".")
     if (parts[2] == "pow") {
         if (argc != 2) error("math.pow expects 2 arguments")
@@ -61,8 +71,34 @@ function builtin_math(func_name, args, argc,   parts, result, arg, arg_type, arg
             error("math.pow expects numeric arguments")
         }
         result = call_math("pow", objects[args[1], "value"], objects[args[2], "value"])
-        debug_msg("Calling math.pow with arguments " objects[args[1], "value"] ", " objects[args[2], "value"] " result " result)
+        if (debug) debug_msg("Calling math.pow with arguments " objects[args[1], "value"] ", " objects[args[2], "value"] " result " result)
         return create_value(TYPE_FLOAT, result)
+    }
+
+    if (parts[2] == "min" || parts[2] == "max") {
+        if (argc != 2) error("math." parts[2] " expects 2 arguments")
+        arg1_type = objects[args[1], "type"]
+        arg2_type = objects[args[2], "type"]
+        if ((arg1_type != TYPE_INT && arg1_type != TYPE_FLOAT) ||
+            (arg2_type != TYPE_INT && arg2_type != TYPE_FLOAT)) {
+            error("math." parts[2] " expects numeric arguments")
+        }
+        v1 = objects[args[1], "value"]
+        v2 = objects[args[2], "value"]
+        winner = (parts[2] == "min") ? (v1 <= v2 ? args[1] : args[2]) : (v1 >= v2 ? args[1] : args[2])
+        return create_value(objects[winner, "type"], objects[winner, "value"])
+    }
+
+    if (parts[2] == "random") {
+        if (argc != 0) error("math.random expects no arguments")
+        return create_value(TYPE_FLOAT, rand())
+    }
+
+    if (parts[2] == "floor" || parts[2] == "ceil" || parts[2] == "round") {
+        if (argc != 1) error("math." parts[2] " expects 1 argument")
+        arg_type = objects[args[1], "type"]
+        if (arg_type != TYPE_INT && arg_type != TYPE_FLOAT) error("math." parts[2] " expects numeric argument")
+        return create_value(TYPE_INT, math_round_like(parts[2], objects[args[1], "value"]))
     }
 
     if (argc != 1) error(func_name " expects 1 argument")
@@ -72,7 +108,7 @@ function builtin_math(func_name, args, argc,   parts, result, arg, arg_type, arg
         error(func_name " expects numeric argument")
     }
     result = call_math(parts[2], objects[arg, "value"])
-    debug_msg("Calling math function " func_name " with argument type " arg_type " value " objects[arg, "value"] " result " result)
+    if (debug) debug_msg("Calling math function " func_name " with argument type " arg_type " value " objects[arg, "value"] " result " result)
     return create_value(TYPE_FLOAT, result)
 }
 
@@ -102,4 +138,15 @@ function math_atan(x) {
 
 function math_pow(x, y) {
     return x^y
+}
+
+function math_floor(x,   t) {
+    t = int(x)
+    return (x < 0 && t != x) ? t - 1 : t
+}
+
+function math_round_like(kind, x) {
+    if (kind == "floor") return math_floor(x)
+    if (kind == "ceil") return -math_floor(-x)
+    return (x >= 0) ? math_floor(x + 0.5) : -math_floor(-x + 0.5)
 }

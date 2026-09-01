@@ -1,6 +1,6 @@
 
 function create_regex_module(obj_id, fun_id, methods, i) {
-    debug_msg("Creating regex module")
+    if (debug) debug_msg("Creating regex module")
     obj_id = create_object()
     objects[obj_id, "type"] = TYPE_STRUCT
     objects[obj_id, "struct_name"] = "regex"

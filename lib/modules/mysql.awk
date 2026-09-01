@@ -1,6 +1,6 @@
 
 function create_mysql_module(obj_id, fun_id, methods, funcs, i) {
-    debug_msg("Creating mysql module")
+    if (debug) debug_msg("Creating mysql module")
     obj_id = create_object()
     objects[obj_id, "type"] = TYPE_STRUCT
     objects[obj_id, "struct_name"] = "mysql"

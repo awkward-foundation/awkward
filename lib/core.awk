@@ -4,6 +4,9 @@ BEGIN {
         if (ARGV[i] == "--debug") {
             debug = 1
             ARGV[i] = ""
+        } else if (ARGV[i] == "--profile") {
+            profile = 1
+            ARGV[i] = ""
         }
     }
 
@@ -12,6 +15,16 @@ BEGIN {
     if (ARGC > 1) {
         program_file = ARGV[1]
         ARGV[1] = ""
+
+        script_argc = 0
+        for (i = 2; i < ARGC; i++) {
+            if (ARGV[i] != "") {
+                script_argc++
+                SCRIPT_ARGV[script_argc] = ARGV[i]
+                ARGV[i] = ""
+            }
+        }
+
         execute_program(program_file)
         exit(0)
     } else {
@@ -26,12 +39,14 @@ function debug_msg(msg) {
 }
 
 function init_interpreter() {
-    VERSION = "0.1.2"
+    VERSION = "0.3.0"
 
-    debug_msg("Initializing awkward interpreter version " VERSION)
+    if (debug) debug_msg("Initializing awkward interpreter version " VERSION)
 
     call_stack_size = 0
     gc_protect_id = ""
+    eval_protect_count = 0
+    current_line = 0
 
     ast_node_counter = 0
 
@@ -39,6 +54,7 @@ function init_interpreter() {
     global_scope_id = ++scope_counter
     scopes[global_scope_id, "parent"] = 0
     scopes[global_scope_id, "variables_count"] = 0
+    all_scope_ids[global_scope_id] = 1
     current_scope_id = global_scope_id
 
     object_counter = 0
@@ -49,6 +65,9 @@ function init_interpreter() {
     return_value_set = 0
     break_flag = 0
     continue_flag = 0
+
+    STD_ERR = "/dev/stderr"
+    AWKWARD_CACHE = "_cached"
 
     DEBUG_LEVEL = 1
 
@@ -62,6 +81,8 @@ function init_interpreter() {
     TYPE_FUNCTION = "fn"
     TYPE_STRUCT = "struct"
     TYPE_ENUM = "enum"
+    TYPE_ITERATOR = "iterator"
+    TYPE_OPTIONAL = "?"
 
     BUILTIN_MODULES["math"] = 1
     BUILTIN_MODULES["system"] = 1
@@ -71,19 +92,11 @@ function init_interpreter() {
     BUILTIN_MODULES["regex"] = 1
     BUILTIN_MODULES["kek"] = 1
     BUILTIN_MODULES["mysql"] = 1
+    BUILTIN_MODULES["stdin"] = 1
+    BUILTIN_MODULES["json"] = 1
+    BUILTIN_MODULES["argparse"] = 1
 
     http_request_counter = 0
-
-    STRING_METHODS["upper"] = "string.upper"
-    STRING_METHODS["lower"] = "string.lower"
-    STRING_METHODS["len"]   = "string.len"
-
-    ARRAY_METHODS["append"] = "array.append"
-    ARRAY_METHODS["extend"] = "array.extend"
-    ARRAY_METHODS["len"]   = "array.len"
-
-    FUNCTION_METHODS["name"]   = "function.name"
-    FUNCTION_METHODS["call"]   = "function.call"
 
     init_operators()
 
@@ -91,22 +104,25 @@ function init_interpreter() {
     init_builtin_methods()
 }
 
-function tokenize(code,   token_count, pos, token_found, current_char, substr_code, type, token_value) {
-    debug_msg("Starting tokenization of code with length " length(code))
+function tokenize(code,   token_count, pos, token_found, current_char, substr_code, type, token_value, line) {
+    if (debug) debug_msg("Starting tokenization of code with length " length(code))
     delete tokens
+    delete token_lines
     token_count = 0
+    line = 1
 
     patterns["NUMBER"] = "^[0-9]+\\.?[0-9]*"
     patterns["STRING"] = "^\"([^\"\\\\]|\\\\.)*\""
     patterns["IDENTIFIER"] = "^[a-zA-Z_][a-zA-Z0-9_]*"
-    patterns["OPERATOR"] = "^(\\+\\+|--|\\+=|-=|\\*=|/=|==|!=|<=|>=|&&|\\|\\||\\+|-|\\*|/|%|<|>|=|!|:)"
-    patterns["DELIMITER"] = "^[{}\\[\\]();,.]"
-    patterns["KEYWORD"] = "^(let|if|else|while|for|fn|struct|return|break|continue|try|catch|finally|import|null|true|false|in|new|impl|from|lambda|pipe|enum)([^a-zA-Z0-9_]|$)"
+    patterns["OPERATOR"] = "^(\\+\\+|--|\\+=|-=|\\*=|/=|==|!=|<=|>=|&&|\\|\\||\\+|-|\\*|/|%|<|>|=|!|:|?)"
+    patterns["DELIMITER"] = "^[][{}();,.]"
+    patterns["KEYWORD"] = "^(let|if|else|while|for|fn|struct|extends|return|break|continue|try|catch|finally|throw|import|null|true|false|in|new|impl|from|lambda|pipe|enum)([^a-zA-Z0-9_]|$)"
     patterns["COMMENT_HASH"] = "^#[^\n]*"
 
     pos = 1
     while (pos <= length(code)) {
         while (pos <= length(code) && match(substr(code, pos, 1), /[ \t\n\r]/)) {
+            if (substr(code, pos, 1) == "\n") line++
             pos++
         }
 
@@ -119,7 +135,7 @@ function tokenize(code,   token_count, pos, token_found, current_char, substr_co
         if (match(substr_code, patterns["COMMENT_HASH"])) {
             type = "COMMENT"
             token_value = substr(substr_code, 1, RLENGTH)
-            debug_msg("Found comment: " token_value)
+            if (debug) debug_msg("Found comment: " token_value)
             pos += RLENGTH
             token_found = 1
             continue
@@ -164,11 +180,14 @@ function tokenize(code,   token_count, pos, token_found, current_char, substr_co
         }
 
         if (!token_found) {
+            current_line = line
             error("Unknown symbol: " current_char " at position " pos)
+        } else {
+            token_lines[token_count] = line
         }
     }
 
-    debug_msg("Tokenization complete, found " token_count " tokens")
+    if (debug) debug_msg("Tokenization complete, found " token_count " tokens")
     if (debug) {
         for (token in tokens) {
             if (debug) debug_msg(token " token= " tokens[token])
@@ -203,18 +222,18 @@ function unescape_string(s,    out, i, n, c, next_c) {
 }
 
 function parse(tokens_array, token_cnt,   prog_node) {
-    debug_msg("Starting parsing with " token_cnt " tokens")
+    if (debug) debug_msg("Starting parsing with " token_cnt " tokens")
     delete ast_nodes
     current_token = 1
     total_tokens = token_cnt
 
     prog_node = parse_program(dir_path)
-    debug_msg("Parsing complete, AST node count: " ast_node_counter)
+    if (debug) debug_msg("Parsing complete, AST node count: " ast_node_counter)
     return prog_node
 }
 
 function parse_program(dir_path,   prog_node, stmt_node) {
-    debug_msg("Parsing program")
+    if (debug) debug_msg("Parsing program")
     prog_node = ++ast_node_counter
     ast_nodes[prog_node, "type"] = "Program"
     ast_nodes[prog_node, "dir_path"] = dir_path
@@ -224,59 +243,67 @@ function parse_program(dir_path,   prog_node, stmt_node) {
         stmt_node = parse_statement()
         if (stmt_node != "") {
             ast_nodes[prog_node, "body_" ++ast_nodes[prog_node, "body_count"]] = stmt_node
-            debug_msg("Added to program body: node " stmt_node " of type " ast_nodes[stmt_node, "type"] (ast_nodes[stmt_node, "name"] ? " name " ast_nodes[stmt_node, "name"] : ""))
+            if (debug) debug_msg("Added to program body: node " stmt_node " of type " ast_nodes[stmt_node, "type"] (ast_nodes[stmt_node, "name"] ? " name " ast_nodes[stmt_node, "name"] : ""))
         }
     }
 
     return prog_node
 }
 
-function parse_statement(   token, token_parts, token_type, token_value) {
-    debug_msg("Parsing statement")
+function parse_statement(   token, token_parts, token_type, token_value, stmt_line, node) {
+    if (debug) debug_msg("Parsing statement")
     if (current_token > total_tokens) return ""
+
+    stmt_line = get_current_line()
+    current_line = stmt_line
 
     token = tokens[current_token]
     split(token, token_parts, ":")
     token_type = token_parts[1]
     token_value = token_parts[2]
 
-    debug_msg("Parsing token=(" token_value ", " token_type ")")
+    if (debug) debug_msg("Parsing token=(" token_value ", " token_type ")")
 
     if (token_type == "DELIMITER" && token_value == ";") {
         advance_token()
         return ""
     } else if (token_type == "KEYWORD") {
         if (token_value == "let") {
-            return parse_variable_declaration()
+            node = parse_variable_declaration()
         } else if (token_value == "if") {
-            return parse_if_statement()
+            node = parse_if_statement()
         } else if (token_value == "while") {
-            return parse_while_statement()
+            node = parse_while_statement()
         } else if (token_value == "for") {
-            return parse_for_statement()
+            node = parse_for_statement()
         } else if (token_value == "fn") {
-            return parse_function_declaration()
+            node = parse_function_declaration()
         } else if (token_value == "struct") {
-            return parse_struct_declaration()
+            node = parse_struct_declaration()
         } else if (token_value == "impl") {
-            return parse_impl_declaration()
+            node = parse_impl_declaration()
         } else if (token_value == "return") {
-            return parse_return_statement()
+            node = parse_return_statement()
         } else if (token_value == "break") {
-            return parse_break_statement()
+            node = parse_break_statement()
         } else if (token_value == "continue") {
-            return parse_continue_statement()
+            node = parse_continue_statement()
         } else if (token_value == "try") {
-            return parse_try_statement()
+            node = parse_try_statement()
+        } else if (token_value == "throw") {
+            node = parse_throw_statement()
         } else if (token_value == "lambda") {
-            return parse_lambda_declaration()
+            node = parse_lambda_declaration()
         } else if (token_value == "pipe") {
-            return parse_pipe_declaration()
+            node = parse_pipe_declaration()
         } else if (token_value == "enum") {
-            return parse_enum_declaration()
+            node = parse_enum_declaration()
         }
     }
-    return parse_expression_statement()
+    if (node == "") node = parse_expression_statement()
+
+    if (node != "") ast_nodes[node, "line"] = stmt_line
+    return node
 }
 
 # @doc [pipes]
@@ -287,11 +314,11 @@ function parse_statement(   token, token_parts, token_type, token_value) {
 #   pipe mult
 #   pipe print;
 function parse_pipe_declaration(   left, right, pipe_node) {
-    debug_msg("Parsing pipe expression")
+    if (debug) debug_msg("Parsing pipe expression")
     left = parse_logical_or()
 
     while (get_token_type() == "KEYWORD" && get_token_value() == "pipe") {
-        debug_msg("Found pipe keyword")
+        if (debug) debug_msg("Found pipe keyword")
         advance_token()
 
         right = parse_logical_or()
@@ -308,10 +335,10 @@ function parse_pipe_declaration(   left, right, pipe_node) {
 }
 
 function execute_pipe(node_id,   left_value, right_node, right_type, func_id, args, result, i, argc, callee_node, parts) {
-    debug_msg("Executing pipe expression")
+    if (debug) debug_msg("Executing pipe expression")
 
     left_value = execute(ast_nodes[node_id, "left"])
-    debug_msg("Pipe left value: " left_value)
+    if (debug) debug_msg("Pipe left value: " left_value)
 
     right_node = ast_nodes[node_id, "right"]
     right_type = ast_nodes[right_node, "type"]
@@ -398,30 +425,30 @@ function parse_lambda_declaration(   lambda_node) {
 }
 
 function execute_lambda(node_id,   lambda_id, param_count, i) {
-    debug_msg("execute_lambda called with node=" node_id)
+    if (debug) debug_msg("execute_lambda called with node=" node_id)
 
     if (node_id == "" || node_id == 0) {
         error("execute_lambda: node is empty!")
     }
 
-    debug_msg("Creating lambda function from node " node_id)
+    if (debug) debug_msg("Creating lambda function from node " node_id)
     
     param_count = ast_nodes[node_id, "param_count"]
-    debug_msg("Lambda has " param_count " parameters")
+    if (debug) debug_msg("Lambda has " param_count " parameters")
 
     lambda_id = create_value(TYPE_FUNCTION, "lambda:" node_id)
     objects[lambda_id, "param_count"] = param_count
     for (i = 0; i < param_count; i++) {
         objects[lambda_id, "param_" i] = ast_nodes[node_id, "param_" i]
-        debug_msg("Lambda param " i " = " ast_nodes[node_id, "param_" i])
+        if (debug) debug_msg("Lambda param " i " = " ast_nodes[node_id, "param_" i])
     }
 
     objects[lambda_id, "body"] = ast_nodes[node_id, "body"]
-    debug_msg("Lambda body node: " ast_nodes[node_id, "body"])
+    if (debug) debug_msg("Lambda body node: " ast_nodes[node_id, "body"])
 
     objects[lambda_id, "closure_scope"] = current_scope_id
-    debug_msg("Lambda closure scope: " current_scope_id)
-    debug_msg("Created lambda id=" lambda_id " with " param_count " parameters")
+    if (debug) debug_msg("Lambda closure scope: " current_scope_id)
+    if (debug) debug_msg("Created lambda id=" lambda_id " with " param_count " parameters")
 
     return lambda_id
 }
@@ -437,7 +464,7 @@ function execute_lambda(node_id,   lambda_id, param_count, i) {
 # let color = Color.Red;
 # print(color == Color.Red);    # true
 function parse_enum_declaration(   enum_node, variant_name) {
-    debug_msg("Parsing enum declaration")
+    if (debug) debug_msg("Parsing enum declaration")
     enum_node = ++ast_node_counter
     ast_nodes[enum_node, "type"] = "EnumDeclaration"
     advance_token()
@@ -471,7 +498,7 @@ function parse_enum_declaration(   enum_node, variant_name) {
 }
 
 function execute_enum_declaration(enum_node,   enum_name, enum_id, i, variant_name, variant_id) {
-    debug_msg("Executing enum declaration for " ast_nodes[enum_node, "name"])
+    if (debug) debug_msg("Executing enum declaration for " ast_nodes[enum_node, "name"])
 
     enum_name = ast_nodes[enum_node, "name"]
     enum_id = create_enum(enum_node)
@@ -492,31 +519,31 @@ function execute_enum_declaration(enum_node,   enum_name, enum_id, i, variant_na
 }
 
 function create_enum(enum_def_id,   enum_id) {
-    debug_msg("Creating enum from definition node " enum_def_id)
+    if (debug) debug_msg("Creating enum from definition node " enum_def_id)
     enum_id = ++object_counter
     objects[enum_id, "type"] = TYPE_OBJECT
     objects[enum_id, "enum_name"] = ast_nodes[enum_def_id, "name"]
     objects[enum_id, "definition"] = enum_def_id
     objects[enum_id, "properties_count"] = 0
     register_object(enum_id)
-    debug_msg("Created enum " objects[enum_id, "enum_name"] " with id " enum_id)
+    if (debug) debug_msg("Created enum " objects[enum_id, "enum_name"] " with id " enum_id)
     return enum_id
 }
 
 function create_enum_variant(enum_name, variant_name, index_,   variant_id) {
-    debug_msg("Creating enum variant " enum_name "." variant_name " = " index_)
+    if (debug) debug_msg("Creating enum variant " enum_name "." variant_name " = " index_)
     variant_id = ++object_counter
     objects[variant_id, "type"] = TYPE_ENUM
     objects[variant_id, "enum_name"] = enum_name
     objects[variant_id, "variant_name"] = variant_name
     objects[variant_id, "value"] = index_
     register_object(variant_id)
-    debug_msg("Created enum variant " enum_name "." variant_name " = " index_)
+    if (debug) debug_msg("Created enum variant " enum_name "." variant_name " = " index_)
     return variant_id
 }
 
 function parse_struct_declaration(   struct_node, member_name, property_node) {
-    debug_msg("Parsing struct declaration")
+    if (debug) debug_msg("Parsing struct declaration")
     struct_node = ++ast_node_counter
     ast_nodes[struct_node, "type"] = "StructDeclaration"
     advance_token()
@@ -527,6 +554,14 @@ function parse_struct_declaration(   struct_node, member_name, property_node) {
     ast_nodes[struct_node, "name"] = get_token_value()
     advance_token()
 
+    ast_nodes[struct_node, "parent_name"] = ""
+    if (get_token_type() == "KEYWORD" && get_token_value() == "extends") {
+        advance_token()
+        if (get_token_type() != "IDENTIFIER") error("Expected parent struct name after 'extends'")
+        ast_nodes[struct_node, "parent_name"] = get_token_value()
+        advance_token()
+    }
+
     expect_token("DELIMITER", "{")
 
     ast_nodes[struct_node, "properties_count"] = 0
@@ -534,10 +569,25 @@ function parse_struct_declaration(   struct_node, member_name, property_node) {
         if (get_token_type() == "IDENTIFIER") {
             member_name = get_token_value()
             advance_token()
-            expect_token("DELIMITER", ";")
+
             property_node = ++ast_node_counter
             ast_nodes[property_node, "type"] = "PropertyDefinition"
             ast_nodes[property_node, "name"] = member_name
+            ast_nodes[property_node, "declared_type"] = ""
+            ast_nodes[property_node, "nullable"] = 0
+
+            if (get_token_value() == ":") {
+                advance_token()
+                if (get_token_value() == "?") {
+                    ast_nodes[property_node, "nullable"] = 1
+                    advance_token()
+                }
+                if (get_token_type() != "IDENTIFIER") error("Expected type name after ':'")
+                ast_nodes[property_node, "declared_type"] = get_token_value()
+                advance_token()
+            }
+
+            expect_token("DELIMITER", ";")
             ast_nodes[struct_node, "property_" ++ast_nodes[struct_node, "properties_count"]] = property_node
         } else {
             error("Expected identifier in struct declaration")
@@ -549,7 +599,7 @@ function parse_struct_declaration(   struct_node, member_name, property_node) {
 }
 
 function execute_struct_declaration(struct_node,   struct_name, struct_id) {
-    debug_msg("Executing struct declaration for " ast_nodes[struct_node, "name"])
+    if (debug) debug_msg("Executing struct declaration for " ast_nodes[struct_node, "name"])
     struct_name = ast_nodes[struct_node, "name"]
     struct_id = create_struct(struct_node)
     declare_variable(struct_name, struct_id)
@@ -565,15 +615,24 @@ function execute_struct_declaration(struct_node,   struct_name, struct_id) {
 # };
 # let p = new Point{x=10, y=20};
 # print(p.x);  # prints 10
-function create_struct(struct_def_id,   struct_id) {
-    debug_msg("Creating struct from definition node " struct_def_id)
+function create_struct(struct_def_id,   struct_id, parent_name) {
+    if (debug) debug_msg("Creating struct from definition node " struct_def_id)
     struct_id = ++object_counter
     objects[struct_id, "type"] = TYPE_STRUCT
     objects[struct_id, "struct_name"] = ast_nodes[struct_def_id, "name"]
     objects[struct_id, "definition"] = struct_def_id
     objects[struct_id, "methods_count"] = 0
+
+    parent_name = ast_nodes[struct_def_id, "parent_name"]
+    if (parent_name != "") {
+        objects[struct_id, "parent"] = get_variable(parent_name)
+        if (objects[objects[struct_id, "parent"], "type"] != TYPE_STRUCT || objects[objects[struct_id, "parent"], "definition"] == "") {
+            error("Cannot extend '" parent_name "': not a struct type")
+        }
+    }
+
     register_object(struct_id)
-    debug_msg("Created struct " objects[struct_id, "struct_name"] " with id " struct_id)
+    if (debug) debug_msg("Created struct " objects[struct_id, "struct_name"] " with id " struct_id)
     return struct_id
 }
 
@@ -587,7 +646,7 @@ function create_struct(struct_def_id,   struct_id) {
 #   }
 # }; # This adds the move method to the Point struct.
 function parse_impl_declaration(   impl_node, struct_name, method_node) {
-    debug_msg("Parsing impl declaration")
+    if (debug) debug_msg("Parsing impl declaration")
     impl_node = ++ast_node_counter
     ast_nodes[impl_node, "type"] = "ImplDeclaration"
     advance_token()
@@ -605,7 +664,7 @@ function parse_impl_declaration(   impl_node, struct_name, method_node) {
         if (get_token_type() == "KEYWORD" && get_token_value() == "fn") {
             method_node = parse_function_declaration()
             ast_nodes[impl_node, "method_" ++ast_nodes[impl_node, "methods_count"]] = method_node
-            debug_msg("Added method " ast_nodes[method_node, "name"] " to impl for " struct_name)
+            if (debug) debug_msg("Added method " ast_nodes[method_node, "name"] " to impl for " struct_name)
         } else {
             error("Expected function declaration in impl block")
         }
@@ -615,7 +674,7 @@ function parse_impl_declaration(   impl_node, struct_name, method_node) {
 }
 
 function execute_impl_declaration(impl_node,   struct_name, struct_id, i, method_node, method_id, existing_count, new_index, method_name, j) {
-    debug_msg("Executing impl declaration for " ast_nodes[impl_node, "struct_name"])
+    if (debug) debug_msg("Executing impl declaration for " ast_nodes[impl_node, "struct_name"])
     struct_name = ast_nodes[impl_node, "struct_name"]
     struct_id = get_variable(struct_name)
 
@@ -638,9 +697,10 @@ function execute_impl_declaration(impl_node,   struct_name, struct_id, i, method
 
         new_index = existing_count + i
         method_id = create_closure(method_node, current_scope_id)
+        objects[method_id, "name"] = method_name
         objects[struct_id, "method_" new_index] = method_id
         objects[struct_id, "method_name_" new_index] = method_name
-        debug_msg("Added method " method_name " to struct " struct_name)
+        if (debug) debug_msg("Added method " method_name " to struct " struct_name)
     }
 
     objects[struct_id, "methods_count"] = existing_count + ast_nodes[impl_node, "methods_count"]
@@ -657,7 +717,7 @@ function execute_impl_declaration(impl_node,   struct_name, struct_id, i, method
 #   print(i);
 # }
 function parse_break_statement(   break_node) {
-    debug_msg("Parsing break statement")
+    if (debug) debug_msg("Parsing break statement")
     break_node = ++ast_node_counter
     ast_nodes[break_node, "type"] = "BreakStatement"
     advance_token()
@@ -666,7 +726,7 @@ function parse_break_statement(   break_node) {
 }
 
 function execute_break_statement(break_node) {
-    debug_msg("Executing break statement")
+    if (debug) debug_msg("Executing break statement")
     break_flag = 1
     return create_value(TYPE_NULL, "null", 0)
 }
@@ -681,7 +741,7 @@ function execute_break_statement(break_node) {
 #   print(i);
 # }
 function parse_continue_statement(   continue_node) {
-    debug_msg("Parsing continue statement")
+    if (debug) debug_msg("Parsing continue statement")
     continue_node = ++ast_node_counter
     ast_nodes[continue_node, "type"] = "ContinueStatement"
     advance_token()
@@ -690,7 +750,7 @@ function parse_continue_statement(   continue_node) {
 }
 
 function execute_continue_statement(continue_node) {
-    debug_msg("Executing continue statement")
+    if (debug) debug_msg("Executing continue statement")
     continue_flag = 1
     return create_value(TYPE_NULL, "null", 0)
 }
@@ -702,7 +762,7 @@ function execute_continue_statement(continue_node) {
 # let y = 42;
 # const pi = 3.14;
 function parse_variable_declaration(   var_node) {
-    debug_msg("Parsing variable declaration")
+    if (debug) debug_msg("Parsing variable declaration")
     var_node = ++ast_node_counter
     ast_nodes[var_node, "type"] = "VariableDeclaration"
 
@@ -715,6 +775,24 @@ function parse_variable_declaration(   var_node) {
     ast_nodes[var_node, "id"] = get_token_value()
     advance_token()
 
+    ast_nodes[var_node, "declared_type"] = ""
+    ast_nodes[var_node, "nullable"] = 0
+
+    if (get_token_value() == ":") {
+        advance_token()
+        
+        if (get_token_value() == "?") {
+            ast_nodes[var_node, "nullable"] = 1
+            advance_token()
+        }
+
+        if (get_token_type() != "IDENTIFIER") {
+            error("Expected type name after ':'")
+        }
+        ast_nodes[var_node, "declared_type"] = get_token_value()
+        advance_token()
+    }
+
     if (get_token_value() == "=") {
         advance_token()
         ast_nodes[var_node, "init"] = parse_expression()
@@ -724,12 +802,13 @@ function parse_variable_declaration(   var_node) {
     return var_node
 }
 
-function execute_variable_declaration(var_node,   var_name, init_id, result_id) {
-    debug_msg("Executing variable declaration for " ast_nodes[var_node, "id"])
+function execute_variable_declaration(var_node,   var_name, init_id, result_id, declared_type) {
+    if (debug) debug_msg("Executing variable declaration for " ast_nodes[var_node, "id"])
     var_name = ast_nodes[var_node, "id"]
     init_id = ast_nodes[var_node, "init"]
+    declared_type = ast_nodes[var_node, "declared_type"]
 
-    debug_msg("Variable " var_name " will be declared with init_id " init_id)
+    if (debug) debug_msg("Variable " var_name " will be declared with init_id " init_id)
 
     if (init_id != "") {
         result_id = execute(init_id)
@@ -737,15 +816,59 @@ function execute_variable_declaration(var_node,   var_name, init_id, result_id) 
         result_id = create_value(TYPE_NULL, "null", 0)
     }
 
+    check_declared_type(result_id, declared_type, ast_nodes[var_node, "nullable"], var_name)
+
     declare_variable(var_name, result_id)
+    if (declared_type != "") {
+        scopes[current_scope_id, "type_" var_name] = declared_type
+        scopes[current_scope_id, "nullable_" var_name] = ast_nodes[var_node, "nullable"]
+    }
 
     return result_id
+}
+
+function type_matches(value_id, type_name,   proto_id) {
+    if (type_name == "int") return objects[value_id, "type"] == TYPE_INT
+    if (type_name == "float") return objects[value_id, "type"] == TYPE_FLOAT
+    if (type_name == "string") return objects[value_id, "type"] == TYPE_STRING
+    if (type_name == "bool") return objects[value_id, "type"] == TYPE_BOOL
+    if (type_name == "array") return objects[value_id, "type"] == TYPE_ARRAY
+    if (type_name == "null") return objects[value_id, "type"] == TYPE_NULL
+
+    if (objects[value_id, "type"] == TYPE_ENUM) return objects[value_id, "enum_name"] == type_name
+
+    if (objects[value_id, "type"] != TYPE_STRUCT) return 0
+    proto_id = objects[value_id, "prototype"]
+    while (proto_id != "") {
+        if (objects[proto_id, "struct_name"] == type_name) return 1
+        proto_id = objects[proto_id, "parent"]
+    }
+    return 0
+}
+
+function check_declared_type(value_id, type_name, nullable, var_name,   type_id) {
+    if (type_name == "") return
+    if (type_name != "int" && type_name != "float" && type_name != "string" &&
+        type_name != "bool" && type_name != "array" && type_name != "null") {
+        type_id = try_get_variable(type_name)
+        if (type_id == "" || !((objects[type_id, "type"] == TYPE_STRUCT && objects[type_id, "definition"] != "") ||
+                                (objects[type_id, "type"] == TYPE_OBJECT && objects[type_id, "enum_name"] != ""))) {
+            error("Unknown type '" type_name "'")
+        }
+    }
+    if (objects[value_id, "type"] == TYPE_NULL) {
+        if (nullable) return
+        error("Variable '" var_name "' declared as '" type_name "' cannot be null")
+    }
+    if (!type_matches(value_id, type_name)) {
+        error("Type mismatch for '" var_name "': expected '" type_name "', got '" objects[value_id, "type"] "'")
+    }
 }
 
 function declare_variable(name, value, scope,   key) {
     if (scope == "") scope = current_scope_id
 
-    debug_msg("Declaring variable " name " in scope " scope " with value " value)
+    if (debug) debug_msg("Declaring variable " name " in scope " scope " with value " value)
 
     key = "var_" name
     if ((scope, key) in scopes) {
@@ -753,23 +876,38 @@ function declare_variable(name, value, scope,   key) {
     }
     scopes[scope, key] = value
     scopes[scope, "variables_count"]++
+    scope_var_names[scope, scopes[scope, "variables_count"]] = name
 
-    debug_msg("Declared variable " name " in scope " scope ", check: scopes[" scope "," key "] = " scopes[scope, key])
+    if (debug) debug_msg("Declared variable " name " in scope " scope ", check: scopes[" scope "," key "] = " scopes[scope, key])
 }
 
-function update_variable(name, value,   scope_id, key) {
+function update_variable(name, value,   scope_id, key, type_key) {
     scope_id = current_scope_id
     key = "var_" name
-    debug_msg("Updating variable " name " starting from scope " scope_id)
+    if (debug) debug_msg("Updating variable " name " starting from scope " scope_id)
     while (scope_id != 0) {
         if ((scope_id, key) in scopes) {
+            type_key = "type_" name
+            if ((scope_id, type_key) in scopes) {
+                check_declared_type(value, scopes[scope_id, type_key], scopes[scope_id, "nullable_" name], name)
+            }
             scopes[scope_id, key] = value
-            debug_msg("Updated variable " name " in scope " scope_id)
+            if (debug) debug_msg("Updated variable " name " in scope " scope_id)
             return
         }
         scope_id = scopes[scope_id, "parent"]
     }
     error("Assignment to undeclared variable " name)
+}
+
+function try_get_variable(name,   scope_id, key) {
+    key = "var_" name
+    scope_id = current_scope_id
+    while (scope_id != 0) {
+        if ((scope_id, key) in scopes) return scopes[scope_id, key]
+        scope_id = scopes[scope_id, "parent"]
+    }
+    return ""
 }
 
 function get_variable(name,   scope_id, key) {
@@ -781,7 +919,7 @@ function get_variable(name,   scope_id, key) {
         }
         scope_id = scopes[scope_id, "parent"]
     }
-    error("Variable not found: " name)
+    error("Variable or type not found: " name)
 }
 
 function parse_expression(   expr) {
@@ -799,7 +937,7 @@ function parse_expression(   expr) {
 # x += 1;
 # total -= discount;
 function parse_assignment(   assign_left, assign_right, assign_node, op, bin_op, bin_node) {
-    debug_msg("Parsing assignment")
+    if (debug) debug_msg("Parsing assignment")
     assign_left = parse_pipe_declaration()
 
     op = get_token_value()
@@ -831,71 +969,88 @@ function parse_assignment(   assign_left, assign_right, assign_node, op, bin_op,
     return assign_left
 }
 
-function execute(node_id,   node_type) {
+function execute(node_id,   node_type, result) {
     if (!node_id) return create_value(TYPE_NULL, "null", 0)
     node_type = ast_nodes[node_id, "type"]
-    debug_msg("Executing node " node_id " of type " node_type)
+    if (debug) debug_msg("Executing node " node_id " of type " node_type)
+    if (profile) {
+        prof_execute_calls++
+        prof_node_type_counts[node_type]++
+    }
 
     if (node_type == "Identifier") {
-        return get_variable(ast_nodes[node_id, "name"])
+        result = get_variable(ast_nodes[node_id, "name"])
     } else if (node_type == "BinaryExpression") {
-        return execute_binary_expression(node_id)
+        result = execute_binary_expression(node_id)
     } else if (node_type == "UnaryExpression") {
-        return execute_unary_expression(node_id)
+        result = execute_unary_expression(node_id)
     } else if (node_type == "Literal") {
-        return create_value(ast_nodes[node_id, "value_type"], ast_nodes[node_id, "value"])
+        result = create_value(ast_nodes[node_id, "value_type"], ast_nodes[node_id, "value"])
     } else if (node_type == "CallExpression") {
-        return execute_function_call(node_id)
+        result = execute_function_call(node_id)
     } else if (node_type == "ExpressionStatement") {
-        return execute(ast_nodes[node_id, "expression"])
+        result = execute(ast_nodes[node_id, "expression"])
     } else if (node_type == "ReturnStatement") {
-        return execute_return_statement(node_id)
+        result = execute_return_statement(node_id)
     } else if (node_type == "IfStatement") {
-        return execute_if_statement(node_id)
+        result = execute_if_statement(node_id)
     } else if (node_type == "BlockStatement") {
-        return execute_block_statement(node_id)
+        result = execute_block_statement(node_id)
     } else if (node_type == "AssignmentExpression") {
-        return execute_assignment(node_id)
+        result = execute_assignment(node_id)
     } else if (node_type == "MemberExpression") {
-        return execute_member_expression(node_id)
+        result = execute_member_expression(node_id)
     } else if (node_type == "VariableDeclaration") {
-        return execute_variable_declaration(node_id)
+        result = execute_variable_declaration(node_id)
     } else if (node_type == "WhileStatement") {
-        return execute_while_statement(node_id)
+        result = execute_while_statement(node_id)
     } else if (node_type == "ForInStatement") {
-        return execute_for_in_statement(node_id)
+        result = execute_for_in_statement(node_id)
     } else if (node_type == "ArrayExpression") {
-        return execute_array_expression(node_id)
+        result = execute_array_expression(node_id)
     } else if (node_type == "ObjectExpression") {
-        return execute_object_expression(node_id)
+        result = execute_object_expression(node_id)
     } else if (node_type == "BreakStatement") {
-        return execute_break_statement(node_id)
+        result = execute_break_statement(node_id)
     } else if (node_type == "ContinueStatement") {
-        return execute_continue_statement(node_id)
+        result = execute_continue_statement(node_id)
     } else if (node_type == "TryStatement") {
-        return execute_try_statement(node_id)
+        result = execute_try_statement(node_id)
+    } else if (node_type == "ThrowStatement") {
+        result = execute_throw_statement(node_id)
     } else if (node_type == "LambdaExpression") {
-        return execute_lambda(node_id)
+        result = execute_lambda(node_id)
     } else if (node_type == "PipeExpression") {
-        return execute_pipe(node_id)
+        result = execute_pipe(node_id)
     } else if (node_type == "FunctionDeclaration") {
-        return execute_function_declaration(node_id)
+        result = execute_function_declaration(node_id)
     } else if (node_type == "StructDeclaration") {
-        return execute_struct_declaration(node_id)
+        result = execute_struct_declaration(node_id)
     } else if (node_type == "ImplDeclaration") {
-        return execute_impl_declaration(node_id)
+        result = execute_impl_declaration(node_id)
     } else if (node_type == "EnumDeclaration") {
-        return execute_enum_declaration(node_id)
+        result = execute_enum_declaration(node_id)
     } else if (node_type == "ImportDeclaration") {
-        return execute_import_declaration(node_id)
+        result = execute_import_declaration(node_id)
     } else if (node_type == "Program") {
-        return execute_program_node(node_id)
+        result = execute_program_node(node_id)
+    } else {
+        error("Unknown node type: " node_type)
     }
-    error("Unknown node type: " node_type)
+
+    if (result != "") {
+        eval_protect_count++
+        eval_protect_stack[eval_protect_count] = result
+    }
+    return result
+}
+
+function clear_eval_protection() {
+    eval_protect_count = 0
 }
 
 function execute_member_expression(member_node,   obj_val_id, prop_val_id, type, method_id, property_name, prop_type) {
-    debug_msg("Executing member expression")
+    if (debug) debug_msg("Executing member expression")
 
     obj_val_id = execute(ast_nodes[member_node, "object"])
 
@@ -905,7 +1060,7 @@ function execute_member_expression(member_node,   obj_val_id, prop_val_id, type,
         prop_val_id = create_value(TYPE_STRING, ast_nodes[ast_nodes[member_node, "property"], "name"])
     }
 
-    debug_msg("Object value id: " obj_val_id " of type " objects[obj_val_id, "type"] " value " objects[obj_val_id, "value"])
+    if (debug) debug_msg("Object value id: " obj_val_id " of type " objects[obj_val_id, "type"] " value " objects[obj_val_id, "value"])
 
     type = objects[obj_val_id, "type"]
     prop_type = objects[prop_val_id, "type"]
@@ -929,7 +1084,7 @@ function execute_member_expression(member_node,   obj_val_id, prop_val_id, type,
     if (type == TYPE_OBJECT || type == TYPE_STRUCT) {
         property_name = value_to_string(prop_val_id)
         result = get_object_property(obj_val_id, property_name)
-        debug_msg("Got property '" property_name "': value_id=" result " type=" objects[result, "type"])
+        if (debug) debug_msg("Got property '" property_name "': value_id=" result " type=" objects[result, "type"])
         return result
     }
 
@@ -937,7 +1092,7 @@ function execute_member_expression(member_node,   obj_val_id, prop_val_id, type,
 }
 
 function execute_array_expression(array_node,   elem_count, i, elem_id, element_ids, array_id) {
-    debug_msg("Executing array expression")
+    if (debug) debug_msg("Executing array expression")
     elem_count = ast_nodes[array_node, "elements_count"]
     for (i = 1; i <= elem_count; i++) {
         elem_id = ast_nodes[array_node, "element_" i]
@@ -948,7 +1103,7 @@ function execute_array_expression(array_node,   elem_count, i, elem_id, element_
 }
 
 function execute_object_expression(obj_node,   prop_count, i, prop_id, prop_key, prop_value_id, property_keys, property_values) {
-    debug_msg("Executing object expression")
+    if (debug) debug_msg("Executing object expression")
     prop_count = ast_nodes[obj_node, "properties_count"]
     for (i = 1; i <= prop_count; i++) {
         prop_id = ast_nodes[obj_node, "property_" i]
@@ -973,7 +1128,7 @@ function create_object(property_keys, property_values, count,   obj_id, i) {
 }
 
 function execute_assignment(assign_node,   left_id, right_id, left_name, result_id, left_type, obj_val_id, prop_val_id, type, key) {
-    debug_msg("Executing assignment")
+    if (debug) debug_msg("Executing assignment")
 
     left_id = ast_nodes[assign_node, "left"]
     right_id = ast_nodes[assign_node, "right"]
@@ -1017,7 +1172,7 @@ function execute_assignment(assign_node,   left_id, right_id, left_name, result_
 
 function execute_binary_expression(bin_node,   op, left_val_id, right_val_id, result_type, result_val, lt, rt, lv, rv) {
     op = ast_nodes[bin_node, "operator"]
-    debug_msg("Executing binary expression with operator " op)
+    if (debug) debug_msg("Executing binary expression with operator " op)
 
     left_val_id  = execute(ast_nodes[bin_node, "left"])
     right_val_id = execute(ast_nodes[bin_node, "right"])
@@ -1119,10 +1274,10 @@ function execute_unary_expression(unary_node,   op, operand_id, operand_type, op
 }
 
 function compare_structs(left_id, right_id,   left_count, right_count, i, j, match_, key_l, val_l, key_r, val_r) {
-    debug_msg("Comparing structs " left_id " and " right_id)
+    if (debug) debug_msg("Comparing structs " left_id " and " right_id)
     left_count  = objects[left_id, "properties_count"]
     right_count = objects[right_id, "properties_count"]
-    debug_msg("Left struct has " left_count " properties, right struct has " right_count " properties")
+    if (debug) debug_msg("Left struct has " left_count " properties, right struct has " right_count " properties")
 
     if (left_count != right_count)
         return 0
@@ -1136,7 +1291,7 @@ function compare_structs(left_id, right_id,   left_count, right_count, i, j, mat
             key_r = objects[right_id, "prop_key_" j]
             val_r = objects[right_id, "prop_value_" j]
 
-            debug_msg("Comparing left key " key_l " with right key " key_r)
+            if (debug) debug_msg("Comparing left key " key_l " with right key " key_r)
 
             if (key_l == key_r) {
                 if (objects[val_l, "type"] == TYPE_STRUCT && objects[val_r, "type"] == TYPE_STRUCT) {
@@ -1152,7 +1307,7 @@ function compare_structs(left_id, right_id,   left_count, right_count, i, j, mat
         }
 
         if (!match_) {
-            debug_msg("compare_structs: mismatch on key " key_l)
+            if (debug) debug_msg("compare_structs: mismatch on key " key_l)
             return 0
         }
     }
@@ -1161,14 +1316,14 @@ function compare_structs(left_id, right_id,   left_count, right_count, i, j, mat
 }
 
 function compare_arrays(id1, id2,    len1, len2, i, el1, el2) {
-    debug_msg("Comparing arrays " id1 " and " id2)
+    if (debug) debug_msg("Comparing arrays " id1 " and " id2)
     len1 = objects[id1, "length"]
     len2 = objects[id2, "length"]
 
-    debug_msg("Array lengths: " len1 " vs " len2)
+    if (debug) debug_msg("Array lengths: " len1 " vs " len2)
 
     if (len1 != len2) {
-        debug_msg("compare_arrays: different lengths " len1 " vs " len2)
+        if (debug) debug_msg("compare_arrays: different lengths " len1 " vs " len2)
         return 0
     }
 
@@ -1177,12 +1332,12 @@ function compare_arrays(id1, id2,    len1, len2, i, el1, el2) {
         el2 = objects[id2, "element_" i]
 
         if (objects[el1, "type"] != objects[el2, "type"]) {
-            debug_msg("compare_arrays: element " i " type mismatch: " objects[el1, "type"] " vs " objects[el2, "type"])
+            if (debug) debug_msg("compare_arrays: element " i " type mismatch: " objects[el1, "type"] " vs " objects[el2, "type"])
             return 0
         }
 
         if (objects[el1, "value"] != objects[el2, "value"]) {
-            debug_msg("compare_arrays: element " i " value mismatch: " \
+            if (debug) debug_msg("compare_arrays: element " i " value mismatch: " \
                       objects[el1, "value"] " vs " objects[el2, "value"])
             return 0
         }
@@ -1192,9 +1347,9 @@ function compare_arrays(id1, id2,    len1, len2, i, el1, el2) {
 }
 
 function execute_function_call(call_node,   callee_node, args, argc, i, arg_id, result_id, val_id, parts, val_value) {
-    debug_msg("Executing function call")
+    if (debug) debug_msg("Executing function call")
     callee_node = ast_nodes[call_node, "callee_node"]
-    debug_msg("Callee node: " callee_node " of type " ast_nodes[callee_node, "type"] " value " ast_nodes[callee_node, "value"])
+    if (debug) debug_msg("Callee node: " callee_node " of type " ast_nodes[callee_node, "type"] " value " ast_nodes[callee_node, "value"])
     argc = ast_nodes[call_node, "args_count"]
     delete args
     for (i = 1; i <= argc; i++) {
@@ -1202,14 +1357,17 @@ function execute_function_call(call_node,   callee_node, args, argc, i, arg_id, 
         args[i] = arg_id
     }
     val_id = execute(callee_node)
-    debug_msg("Callee value id: " val_id " of type " objects[val_id, "type"] " value " objects[val_id, "value"])
+    if (error_occurred) return create_value(TYPE_NULL, "null", 0)
+    if (debug) debug_msg("Callee value id: " val_id " of type " objects[val_id, "type"] " value " objects[val_id, "value"])
     val_value = objects[val_id, "value"]
 
     if (val_value ~ /^lambda:/) {
         for (i = 1; i <= argc; i++) {
             args[i] = execute(args[i])
+            if (error_occurred) break
         }
-        debug_msg("Calling lambda function")
+        if (error_occurred) return create_value(TYPE_NULL, "null", 0)
+        if (debug) debug_msg("Calling lambda function")
         return call_lambda(val_id, args, argc)
     }
 
@@ -1217,16 +1375,20 @@ function execute_function_call(call_node,   callee_node, args, argc, i, arg_id, 
         split(val_value, parts, ":")
         for (i = 1; i <= argc; i++) {
             args[i] = execute(args[i])
+            if (error_occurred) break
         }
+        if (error_occurred) return create_value(TYPE_NULL, "null", 0)
         if (objects[val_id, "self"] != "") {
             args[0] = objects[val_id, "self"]
         }
-        debug_msg("Calling builtin function " parts[1] " with " argc " args")
+        if (debug) debug_msg("Calling builtin function " parts[1] " with " argc " args")
         return call_builtin(parts[2], args, argc)
     } else if (objects[val_id, "type"] == TYPE_FUNCTION) {
         for (i = 1; i <= argc; i++) {
             args[i] = execute(args[i])
+            if (error_occurred) break
         }
+        if (error_occurred) return create_value(TYPE_NULL, "null", 0)
         return call_function(val_id, args, argc)
     } else if (objects[val_id, "type"] == TYPE_STRUCT || objects[val_id, "type"] == TYPE_OBJECT) {
         return create_instance(val_id, args, argc)
@@ -1235,49 +1397,58 @@ function execute_function_call(call_node,   callee_node, args, argc, i, arg_id, 
     return create_value(TYPE_NULL, "null", 0)
 }
 
-function call_lambda(lambda_id, args, argc,   param_count, i, body_node, old_scope, result, new_scope) {
-    debug_msg("call_lambda: id=" lambda_id " argc=" argc)
+function call_lambda(lambda_id, args, argc,   param_count, i, body_node, old_scope, result, lambda_scope, saved_current_line) {
+    if (debug) debug_msg("call_lambda: id=" lambda_id " argc=" argc)
 
     param_count = objects[lambda_id, "param_count"]
-    debug_msg("Lambda expects " param_count " parameters")
+    if (debug) debug_msg("Lambda expects " param_count " parameters")
 
     if (argc != param_count) {
         error("Lambda expects " param_count " arguments, got " argc)
     }
 
     old_scope = current_scope_id
-    new_scope = ++scope_counter
-    current_scope_id = new_scope
-    scopes[new_scope, "parent"] = objects[lambda_id, "closure_scope"]
-    debug_msg("Created lambda scope " new_scope " with parent " scopes[new_scope, "parent"])
+    lambda_scope = new_scope(objects[lambda_id, "closure_scope"])
+    current_scope_id = lambda_scope
+    if (debug) debug_msg("Created lambda scope " lambda_scope " with parent " scopes[lambda_scope, "parent"])
 
     for (i = 0; i < param_count; i++) {
-        debug_msg("Declaring lambda param " objects[lambda_id, "param_" i] " = " args[i + 1] " in scope " new_scope)
-        declare_variable(objects[lambda_id, "param_" i], args[i + 1], new_scope)
+        if (debug) debug_msg("Declaring lambda param " objects[lambda_id, "param_" i] " = " args[i + 1] " in scope " lambda_scope)
+        declare_variable(objects[lambda_id, "param_" i], args[i + 1], lambda_scope)
     }
 
+    call_stack[++call_stack_size, "scope"] = current_scope_id
+    call_stack[call_stack_size, "name"] = "<lambda>"
+    call_stack[call_stack_size, "call_line"] = current_line
+    saved_current_line = current_line
+
     body_node = objects[lambda_id, "body"]
-    debug_msg("Executing lambda body node " body_node)
+    if (debug) debug_msg("Executing lambda body node " body_node)
     result = execute(body_node)
 
+    delete call_stack[call_stack_size]
+    call_stack_size--
     current_scope_id = old_scope
-    debug_msg("Restored scope to " current_scope_id)
+    current_line = saved_current_line
+    if (debug) debug_msg("Restored scope to " current_scope_id)
 
     return result
 }
 
 function resolve_identifier(id_name) {
-    debug_msg("Resolving identifier " id_name)
+    if (debug) debug_msg("Resolving identifier " id_name)
     return get_variable(id_name)
 }
 
 function execute_program_node(prog_node,   result_id, i, stmt_node) {
-    debug_msg("Executing program node")
+    if (debug) debug_msg("Executing program node")
     result_id = create_value(TYPE_NULL, "null")
 
     for (i = 1; i <= ast_nodes[prog_node, "body_count"]; i++) {
         stmt_node = ast_nodes[prog_node, "body_" i]
+        if (ast_nodes[stmt_node, "line"] != "") current_line = ast_nodes[stmt_node, "line"]
         result_id = execute(stmt_node)
+        clear_eval_protection()
 
         if (control_flow_active()) {
             break
@@ -1298,12 +1469,12 @@ function create_value(type, val, register,   obj_id) {
     if (type == TYPE_STRING) {
         objects[obj_id, "length"] = length(val)
     }
-    debug_msg("Created value of type " type " with id " obj_id " (registered=" register ")")
+    if (debug) debug_msg("Created value of type " type " with id " obj_id " (registered=" register ")")
     return obj_id
 }
 
 function type_check(val1_id, val2_id, operation,   type1, type2) {
-    debug_msg("Type checking values " val1_id " and " val2_id " for operation " operation)
+    if (debug) debug_msg("Type checking values " val1_id " and " val2_id " for operation " operation)
     type1 = objects[val1_id, "type"]
     type2 = objects[val2_id, "type"]
 
@@ -1334,19 +1505,26 @@ function type_check(val1_id, val2_id, operation,   type1, type2) {
 }
 
 function register_object(obj_id) {
-    debug_msg("Registering object " obj_id)
+    if (debug) debug_msg("Registering object " obj_id)
     if (object_counter % gc_threshold == 0) {
-        debug_msg("GC threshold reached (" object_counter " objects), running garbage collector...")
+        if (debug) debug_msg("GC threshold reached (" object_counter " objects), running garbage collector...")
         gc_protect_id = obj_id
         garbage_collect()
         gc_protect_id = ""
     }
 }
 
-function garbage_collect(   idx, parts, id, deleted_ids, swept) {
-    debug_msg("Starting garbage collector...")
+function garbage_collect(   idx, parts, id, deleted_ids, swept,
+                            sid, dead_scopes, i, var_count, var_name, swept_scopes,
+                            prof_gc_start) {
+    if (debug) debug_msg("Starting garbage collector...")
+    if (profile) {
+        prof_gc_count++
+        prof_gc_start = _now()
+    }
 
     delete marked
+    delete marked_scopes
     mark_reachable_objects()
 
     swept = 0
@@ -1358,38 +1536,64 @@ function garbage_collect(   idx, parts, id, deleted_ids, swept) {
             delete objects[idx]
             deleted_ids[id] = 1
         }
-        debug_msg("GC: checked object " id)
+        if (debug) debug_msg("GC: checked object " id)
     }
     swept = length(deleted_ids)
 
-    debug_msg("GC: deleted " swept " objects")
+    if (debug) debug_msg("GC: deleted " swept " objects")
+
+    delete dead_scopes
+    for (sid in all_scope_ids) {
+        if (!(sid in marked_scopes)) {
+            dead_scopes[sid] = 1
+        }
+    }
+    for (sid in dead_scopes) {
+        var_count = scopes[sid, "variables_count"] + 0
+        for (i = 1; i <= var_count; i++) {
+            var_name = scope_var_names[sid, i]
+            delete scopes[sid, "var_" var_name]
+            delete scope_var_names[sid, i]
+        }
+        delete scopes[sid, "parent"]
+        delete scopes[sid, "variables_count"]
+        delete all_scope_ids[sid]
+    }
+    swept_scopes = length(dead_scopes)
+
+    if (debug) debug_msg("GC: deleted " swept_scopes " scopes")
+    if (profile) prof_gc_time += (_now() - prof_gc_start)
 }
 
 function mark_reachable_objects(   i) {
-    debug_msg("Marking reachable objects...")
+    if (debug) debug_msg("Marking reachable objects...")
     mark_scope_objects(global_scope_id)
 
     for (i = 1; i <= call_stack_size; i++) {
         mark_scope_objects(call_stack[i, "scope"])
-        debug_msg("Marked scope " call_stack[i, "scope"] " from call stack")
+        if (debug) debug_msg("Marked scope " call_stack[i, "scope"] " from call stack")
     }
 
     mark_scope_chain(current_scope_id)
 
     if (gc_protect_id != "") mark_object(gc_protect_id)
+
+    for (i = 1; i <= eval_protect_count; i++) {
+        if (eval_protect_stack[i] + 0 == eval_protect_stack[i]) mark_object(eval_protect_stack[i])
+    }
 }
 
 function mark_scope_chain(scope_id) {
-    debug_msg("Marking scope chain starting from scope " scope_id)
+    if (debug) debug_msg("Marking scope chain starting from scope " scope_id)
     while (scope_id != 0) {
         mark_scope_objects(scope_id)
         scope_id = scopes[scope_id, "parent"]
-        debug_msg("Moving to parent scope " scope_id)
+        if (debug) debug_msg("Moving to parent scope " scope_id)
     }
 }
 
 function mark_object(id,   type, i, sub_id, j, prop_count, closure_scope_id) {
-    debug_msg("Marking object " id)
+    if (debug) debug_msg("Marking object " id)
     if (id in marked) return
     marked[id] = 1
 
@@ -1416,32 +1620,34 @@ function mark_object(id,   type, i, sub_id, j, prop_count, closure_scope_id) {
     }
 }
 
-function mark_scope_objects(scope_id,   idx, parts, s_id, key, val_id) {
-    debug_msg("Marking objects in scope " scope_id)
-    for (idx in scopes) {
-        split(idx, parts, SUBSEP)
-        s_id = parts[1]
-        if (s_id == scope_id && substr(parts[2], 1, 4) == "var_") {
-            val_id = scopes[idx]
-            if (val_id + 0 == val_id) {
-                mark_object(val_id)
-            }
+function mark_scope_objects(scope_id,   i, count, name, val_id) {
+    if (debug) debug_msg("Marking objects in scope " scope_id)
+    if (scope_id in marked_scopes) return
+    marked_scopes[scope_id] = 1
+
+    count = scopes[scope_id, "variables_count"] + 0
+    for (i = 1; i <= count; i++) {
+        name = scope_var_names[scope_id, i]
+        val_id = scopes[scope_id, "var_" name]
+        if (val_id + 0 == val_id) {
+            mark_object(val_id)
         }
-        debug_msg("Marked variable " parts[2] " in scope " s_id)
+        if (debug) debug_msg("Marked variable " name " in scope " scope_id)
     }
 }
 
 function new_scope(parent_id,   new_id) {
-    debug_msg("Creating new scope with parent " parent_id)
+    if (debug) debug_msg("Creating new scope with parent " parent_id)
     new_id = ++scope_counter
     scopes[new_id, "parent"] = parent_id
     scopes[new_id, "variables_count"] = 0
-    debug_msg("Created new scope " new_id " with parent " parent_id)
+    all_scope_ids[new_id] = 1
+    if (debug) debug_msg("Created new scope " new_id " with parent " parent_id)
     return new_id
 }
 
 function init_builtins() {
-    debug_msg("Initializing built-in functions...")
+    if (debug) debug_msg("Initializing built-in functions...")
     register_builtin_function("id")
     register_builtin_function("print")
     register_builtin_function("type")
@@ -1453,25 +1659,51 @@ function init_builtins() {
     register_builtin_function("map")
     register_builtin_function("reduce")
     register_builtin_function("range")
+    register_builtin_function("int")
+    register_builtin_function("float")
+    register_builtin_function("str")
+    register_builtin_function("format")
 }
 
 function init_builtin_methods() {
-    debug_msg("Initializing built-in methods...")
+    if (debug) debug_msg("Initializing built-in methods...")
     METHODS[TYPE_STRING, "upper"] = "string.upper"
     METHODS[TYPE_STRING, "lower"] = "string.lower"
     METHODS[TYPE_STRING, "len"]   = "string.len"
     METHODS[TYPE_STRING, "split"]   = "string.split"
+    METHODS[TYPE_STRING, "trim"]    = "string.trim"
+    METHODS[TYPE_STRING, "contains"]    = "string.contains"
+    METHODS[TYPE_STRING, "index_of"]    = "string.index_of"
+    METHODS[TYPE_STRING, "starts_with"] = "string.starts_with"
+    METHODS[TYPE_STRING, "ends_with"]   = "string.ends_with"
+    METHODS[TYPE_STRING, "replace"]     = "string.replace"
+    METHODS[TYPE_STRING, "reverse"]     = "string.reverse"
+    METHODS[TYPE_STRING, "repeat"]      = "string.repeat"
+    METHODS[TYPE_STRING, "slice"]       = "string.slice"
 
     METHODS[TYPE_ARRAY, "append"] = "array.append"
     METHODS[TYPE_ARRAY, "extend"] = "array.extend"
     METHODS[TYPE_ARRAY, "len"]    = "array.len"
+    METHODS[TYPE_ARRAY, "contains"] = "array.contains"
+    METHODS[TYPE_ARRAY, "index_of"] = "array.index_of"
+    METHODS[TYPE_ARRAY, "reverse"]  = "array.reverse"
+    METHODS[TYPE_ARRAY, "slice"]    = "array.slice"
+    METHODS[TYPE_ARRAY, "join"]     = "array.join"
+    METHODS[TYPE_ARRAY, "sort"]     = "array.sort"
 
     METHODS[TYPE_FUNCTION, "name"] = "function.name"
     METHODS[TYPE_FUNCTION, "call"] = "function.call"
+
+    METHODS[TYPE_OBJECT, "keys"]   = "object.keys"
+    METHODS[TYPE_OBJECT, "values"] = "object.values"
+    METHODS[TYPE_OBJECT, "has"]    = "object.has"
+    METHODS[TYPE_OBJECT, "remove"] = "object.remove"
+
+    METHODS[TYPE_ITERATOR, "next"] = "iterator.next"
 }
 
 function try_get_builtin_method(obj_val_id, method_name,   type, func_id) {
-    debug_msg("Trying to get builtin method " method_name " for object " obj_val_id)
+    if (debug) debug_msg("Trying to get builtin method " method_name " for object " obj_val_id)
     type = objects[obj_val_id, "type"]
 
     if ((type, method_name) in METHODS) {
@@ -1483,18 +1715,53 @@ function try_get_builtin_method(obj_val_id, method_name,   type, func_id) {
     return ""
 }
 
+function get_iterator_next_method(obj_id,   type, prototype_id, i, method_id) {
+    method_id = try_get_builtin_method(obj_id, "next")
+    if (method_id != "") return method_id
+
+    type = objects[obj_id, "type"]
+    if (type == TYPE_STRUCT && objects[obj_id, "prototype"] != "") {
+        prototype_id = objects[obj_id, "prototype"]
+        while (prototype_id != "") {
+            for (i = 1; i <= objects[prototype_id, "methods_count"]; i++) {
+                if (objects[prototype_id, "method_name_" i] == "next") {
+                    method_id = objects[prototype_id, "method_" i]
+                    objects[method_id, "self"] = obj_id
+                    return method_id
+                }
+            }
+            prototype_id = objects[prototype_id, "parent"]
+        }
+    }
+    return ""
+}
+
+function call_bound_method(method_id, args, argc,   val_value, parts) {
+    val_value = objects[method_id, "value"]
+    if (val_value ~ /^lambda:/) {
+        return call_lambda(method_id, args, argc)
+    } else if (val_value ~ /^builtin:/) {
+        split(val_value, parts, ":")
+        if (objects[method_id, "self"] != "") args[0] = objects[method_id, "self"]
+        return call_builtin(parts[2], args, argc)
+    } else if (objects[method_id, "type"] == TYPE_FUNCTION) {
+        return call_function(method_id, args, argc)
+    }
+    error("Value is not callable")
+}
+
 function is_indexable(type) {
-    debug_msg("Checking if type " type " is indexable")
+    if (debug) debug_msg("Checking if type " type " is indexable")
     return (type == TYPE_ARRAY || type == TYPE_STRING)
 }
 
 function is_index_writable(type) {
-    debug_msg("Checking if type " type " is index writable")
+    if (debug) debug_msg("Checking if type " type " is index writable")
     return (type == TYPE_ARRAY || type == TYPE_STRING)
 }
 
 function register_builtin_function(name,   fun_id) {
-    debug_msg("Registering builtin function " name)
+    if (debug) debug_msg("Registering builtin function " name)
     fun_id = create_value(TYPE_FUNCTION, "builtin:" name)
     objects[fun_id, "name"] = name
     objects[fun_id, "is_builtin"] = 1
@@ -1502,7 +1769,7 @@ function register_builtin_function(name,   fun_id) {
 }
 
 function get_indexed_value(obj_val_id, index_val_id,   type, prop_type, index_, str_len, char) {
-    debug_msg("Getting indexed value from object " obj_val_id)
+    if (debug) debug_msg("Getting indexed value from object " obj_val_id)
     type = objects[obj_val_id, "type"]
     prop_type = objects[index_val_id, "type"]
 
@@ -1528,7 +1795,7 @@ function get_indexed_value(obj_val_id, index_val_id,   type, prop_type, index_, 
 }
 
 function set_indexed_value(obj_val_id, index_val_id, value_id,   type, prop_type, index_, old_str, old_str_len, new_char, new_str) {
-    debug_msg("Setting indexed value in object " obj_val_id)
+    if (debug) debug_msg("Setting indexed value in object " obj_val_id)
     type = objects[obj_val_id, "type"]
     prop_type = objects[index_val_id, "type"]
 
@@ -1580,7 +1847,7 @@ function set_indexed_value(obj_val_id, index_val_id, value_id,   type, prop_type
 }
 
 function init_custom_builtins(module_name,  obj_id) {
-    debug_msg("Initializing custom builtin module: " module_name)
+    if (debug) debug_msg("Initializing custom builtin module: " module_name)
     if (module_name == "math") {
         obj_id = create_math_module()
         return obj_id
@@ -1605,12 +1872,21 @@ function init_custom_builtins(module_name,  obj_id) {
     } else if (module_name == "mysql") {
         obj_id = create_mysql_module()
         return obj_id
+    } else if (module_name == "stdin") {
+        obj_id = create_stdin_module()
+        return obj_id
+    } else if (module_name == "json") {
+        obj_id = create_json_module()
+        return obj_id
+    } else if (module_name == "argparse") {
+        obj_id = create_argparse_module()
+        return obj_id
     }
     return create_value(TYPE_NULL, "null", 0)
 }
 
 function get_object_property(obj_val_id, key,   i, prototype_id, method_id) {
-    debug_msg("Getting property '" key "' from object " obj_val_id)
+    if (debug) debug_msg("Getting property '" key "' from object " obj_val_id)
 
     for (i = 1; i <= objects[obj_val_id, "properties_count"]; i++) {
         if (objects[obj_val_id, "prop_key_" i] == key) {
@@ -1619,25 +1895,31 @@ function get_object_property(obj_val_id, key,   i, prototype_id, method_id) {
     }
 
     if ((obj_val_id, key) in objects) {
-        debug_msg("  Found as direct property")
+        if (debug) debug_msg("  Found as direct property")
         return objects[obj_val_id, key]
     }
 
     if (objects[obj_val_id, "prototype"] != "") {
         prototype_id = objects[obj_val_id, "prototype"]
-        for (i = 1; i <= objects[prototype_id, "methods_count"]; i++) {
-            if (objects[prototype_id, "method_name_" i] == key) {
-                method_id = objects[prototype_id, "method_" i]
-                objects[method_id, "self"] = obj_val_id
-                return method_id
+        while (prototype_id != "") {
+            for (i = 1; i <= objects[prototype_id, "methods_count"]; i++) {
+                if (objects[prototype_id, "method_name_" i] == key) {
+                    method_id = objects[prototype_id, "method_" i]
+                    objects[method_id, "self"] = obj_val_id
+                    return method_id
+                }
             }
+            prototype_id = objects[prototype_id, "parent"]
         }
+    }
+    if (objects[obj_val_id, "type"] == TYPE_OBJECT) {
+        return create_value(TYPE_NULL, "null")
     }
     error("Property or method not found: " key)
 }
 
 function set_object_property(obj_val_id, key, value_id,   i) {
-    debug_msg("Setting property '" key "' on object " obj_val_id)
+    if (debug) debug_msg("Setting property '" key "' on object " obj_val_id)
     for (i = 1; i <= objects[obj_val_id, "properties_count"]; i++) {
         if (objects[obj_val_id, "prop_key_" i] == key) {
             objects[obj_val_id, "prop_value_" i] = value_id
@@ -1653,7 +1935,7 @@ function set_object_property(obj_val_id, key, value_id,   i) {
 }
 
 function call_builtin(func_name, args, argc) {
-    debug_msg("Builtin function " func_name " with " argc " arguments")
+    if (debug) debug_msg("Builtin function " func_name " with " argc " arguments")
 
     # builins functions
     if (func_name == "id") return builtin_id(args, argc)
@@ -1667,6 +1949,10 @@ function call_builtin(func_name, args, argc) {
     if (func_name == "map") return builtin_map(args, argc)
     if (func_name == "reduce") return builtin_reduce(args, argc)
     if (func_name == "range") return builtin_range(args, argc)
+    if (func_name == "int") return builtin_int(args, argc)
+    if (func_name == "float") return builtin_float(args, argc)
+    if (func_name == "str") return builtin_str(args, argc)
+    if (func_name == "format") return builtin_format(args, argc)
 
     # builins modules
     if (func_name ~ /^math\./) return builtin_math(func_name, args, argc)
@@ -1677,11 +1963,16 @@ function call_builtin(func_name, args, argc) {
     if (func_name ~ /^regex\./) return builtin_regex(func_name, args, argc)
     if (func_name ~ /^kek\./) return builtin_kek(func_name, args, argc)
     if (func_name ~ /^mysql\./) return builtin_mysql(func_name, args, argc)
+    if (func_name ~ /^stdin\./) return builtin_stdin(func_name, args, argc)
+    if (func_name ~ /^json\./) return builtin_json(func_name, args, argc)
+    if (func_name ~ /^argparse\./) return builtin_argparse(func_name, args, argc)
+    if (func_name ~ /^object\./) return builtin_object(func_name, args, argc)
 
     # builins object methods
     if (func_name ~ /^string\./) return builtin_string(func_name, args, argc)
     if (func_name ~ /^array\./) return builtin_array(func_name, args, argc)
     if (func_name ~ /^function\./) return builtin_function(func_name, args, argc)
+    if (func_name ~ /^iterator\./) return builtin_iterator(func_name, args, argc)
 
     error("Unknown builtin function: " func_name)
 }
@@ -1695,8 +1986,8 @@ function call_builtin(func_name, args, argc) {
 # str.len()    # returns 5
 # let str = "hello, world";
 # str.split(",")    # returns [hello, world]
-function builtin_string(func_name, args, argc,  self_id, self_value, result) {
-    debug_msg("Executing builtin string method " func_name " with " argc " arguments")
+function builtin_string(func_name, args, argc,  self_id, self_value, result, i, pos, needle, n, start, stop) {
+    if (debug) debug_msg("Executing builtin string method " func_name " with " argc " arguments")
     self_id = args[0]
     if (self_id == "") error("Method " func_name " called without context")
     self_value = objects[self_id, "value"]
@@ -1709,6 +2000,48 @@ function builtin_string(func_name, args, argc,  self_id, self_value, result) {
         return create_value(TYPE_INT, objects[self_id, "length"], 0)
     } else if (func_name == "string.split") {
         return split_string(self_value, args)
+    } else if (func_name == "string.trim") {
+        result = self_value
+        gsub(/^[ \t\r\n]+/, "", result)
+        gsub(/[ \t\r\n]+$/, "", result)
+        return create_value(TYPE_STRING, result)
+    } else if (func_name == "string.contains") {
+        if (argc != 1) error("contains expects 1 argument")
+        return create_value(TYPE_BOOL, index(self_value, objects[args[1], "value"]) > 0)
+    } else if (func_name == "string.index_of") {
+        if (argc != 1) error("index_of expects 1 argument")
+        pos = index(self_value, objects[args[1], "value"])
+        return create_value(TYPE_INT, pos > 0 ? pos - 1 : -1)
+    } else if (func_name == "string.starts_with") {
+        if (argc != 1) error("starts_with expects 1 argument")
+        needle = objects[args[1], "value"]
+        return create_value(TYPE_BOOL, substr(self_value, 1, length(needle)) == needle)
+    } else if (func_name == "string.ends_with") {
+        if (argc != 1) error("ends_with expects 1 argument")
+        needle = objects[args[1], "value"]
+        return create_value(TYPE_BOOL, length(needle) <= length(self_value) && \
+            substr(self_value, length(self_value) - length(needle) + 1) == needle)
+    } else if (func_name == "string.replace") {
+        if (argc != 2) error("replace expects 2 arguments")
+        return create_value(TYPE_STRING, string_replace_all(self_value, objects[args[1], "value"], objects[args[2], "value"]))
+    } else if (func_name == "string.reverse") {
+        result = ""
+        for (i = length(self_value); i >= 1; i--) result = result substr(self_value, i, 1)
+        return create_value(TYPE_STRING, result)
+    } else if (func_name == "string.repeat") {
+        if (argc != 1) error("repeat expects 1 argument")
+        n = objects[args[1], "value"]
+        result = ""
+        for (i = 0; i < n; i++) result = result self_value
+        return create_value(TYPE_STRING, result)
+    } else if (func_name == "string.slice") {
+        if (argc < 1 || argc > 2) error("slice expects 1 or 2 arguments")
+        start = objects[args[1], "value"]
+        stop = (argc == 2) ? objects[args[2], "value"] : length(self_value)
+        if (start < 0) start = 0
+        if (stop > length(self_value)) stop = length(self_value)
+        if (stop < start) stop = start
+        return create_value(TYPE_STRING, substr(self_value, start + 1, stop - start))
     }
     else {
         error("Unknown string method: " func_name)
@@ -1718,8 +2051,18 @@ function builtin_string(func_name, args, argc,  self_id, self_value, result) {
     return self_id
 }
 
+function string_replace_all(s, needle, replacement,   out, pos) {
+    if (needle == "") return s
+    out = ""
+    while ((pos = index(s, needle)) > 0) {
+        out = out substr(s, 1, pos - 1) replacement
+        s = substr(s, pos + length(needle))
+    }
+    return out s
+}
+
 function split_string(self_value, args,   delimiter_id, delimiter_value, result_array, i, part, output_id) {
-    debug_msg("Splitting string id " self_id)
+    if (debug) debug_msg("Splitting string id " self_id)
     delimiter_id = args[1]
     
     delimiter_value = " "
@@ -1744,7 +2087,7 @@ function split_string(self_value, args,   delimiter_id, delimiter_value, result_
 # func.name()  # returns the name of the function
 # func.call()  # calls the function
 function builtin_function(func_name, args, argc,  self_id, self_value) {
-    debug_msg("Executing builtin function method " func_name " with " argc " arguments")
+    if (debug) debug_msg("Executing builtin function method " func_name " with " argc " arguments")
     self_id = args[0]
     if (self_id == "") error("Method " func_name " called without context")
     self_value = objects[self_id, "name"]
@@ -1767,6 +2110,33 @@ function builtin_function(func_name, args, argc,  self_id, self_value) {
     return self_id
 }
 
+# @doc [iterators]
+# Built-in methods for iterator objects
+# examples:
+# let it = range(3);
+# it.next();  # 0
+# it.next();  # 1
+function builtin_iterator(func_name, args, argc,   self_id, kind, cur, end) {
+    if (debug) debug_msg("Executing builtin iterator method " func_name " with " argc " arguments")
+    self_id = args[0]
+    if (self_id == "") error("Method " func_name " called without context")
+
+    if (func_name == "iterator.next") {
+        kind = objects[self_id, "kind"]
+        if (kind == "range") {
+            cur = objects[self_id, "current"]
+            end = objects[self_id, "end"]
+            if (cur >= end) return create_value(TYPE_NULL, "null")
+            objects[self_id, "current"] = cur + 1
+            return create_value(TYPE_INT, cur)
+        }
+        if (kind == "stdin_lines") return stdin_read_line()
+        error("Unknown iterator kind: " kind)
+    } else {
+        error("Unknown iterator method: " func_name)
+    }
+}
+
 # @doc [arrays]
 # Built-in methods for array objects.
 # examples:
@@ -1774,8 +2144,9 @@ function builtin_function(func_name, args, argc,  self_id, self_value) {
 # arr.len()  # returns 3
 # arr.append(4)  # appends 4 to the array
 # arr.extend([5, 6])  # extends the array with another array    
-function builtin_array(func_name, args, argc,  self_id, self_value) {
-    debug_msg("Executing builtin array method " func_name " with " argc " arguments")
+function builtin_array(func_name, args, argc,  self_id, self_value, i, len, value_id, value_type, value_len,
+                        new_elems, start, stop, sep, result_str) {
+    if (debug) debug_msg("Executing builtin array method " func_name " with " argc " arguments")
     self_id = args[0]
     if (self_id == "") error("Method " func_name " called without context")
     self_value = objects[self_id, "value"]
@@ -1800,11 +2171,116 @@ function builtin_array(func_name, args, argc,  self_id, self_value) {
         }
         objects[self_id, "length"] = len + value_len
         return create_value(TYPE_NULL, "null", 0)
+    } else if (func_name == "array.contains") {
+        if (argc != 1) error("contains expects 1 argument")
+        len = objects[self_id, "length"]
+        for (i = 0; i < len; i++) {
+            if (values_equal(objects[self_id, "element_" i], args[1])) return create_value(TYPE_BOOL, 1)
+        }
+        return create_value(TYPE_BOOL, 0)
+    } else if (func_name == "array.index_of") {
+        if (argc != 1) error("index_of expects 1 argument")
+        len = objects[self_id, "length"]
+        for (i = 0; i < len; i++) {
+            if (values_equal(objects[self_id, "element_" i], args[1])) return create_value(TYPE_INT, i)
+        }
+        return create_value(TYPE_INT, -1)
+    } else if (func_name == "array.reverse") {
+        len = objects[self_id, "length"]
+        for (i = 1; i <= len; i++) new_elems[i] = objects[self_id, "element_" (len - i)]
+        return create_array(new_elems, len)
+    } else if (func_name == "array.slice") {
+        if (argc < 1 || argc > 2) error("slice expects 1 or 2 arguments")
+        len = objects[self_id, "length"]
+        start = objects[args[1], "value"]
+        stop = (argc == 2) ? objects[args[2], "value"] : len
+        if (start < 0) start = 0
+        if (stop > len) stop = len
+        if (stop < start) stop = start
+        for (i = start; i < stop; i++) new_elems[i - start + 1] = objects[self_id, "element_" i]
+        return create_array(new_elems, stop - start)
+    } else if (func_name == "array.join") {
+        sep = (argc == 1) ? objects[args[1], "value"] : ""
+        len = objects[self_id, "length"]
+        result_str = ""
+        for (i = 0; i < len; i++) {
+            result_str = (i == 0) ? value_to_string(objects[self_id, "element_" i]) \
+                                   : result_str sep value_to_string(objects[self_id, "element_" i])
+        }
+        return create_value(TYPE_STRING, result_str)
+    } else if (func_name == "array.sort") {
+        len = objects[self_id, "length"]
+        for (i = 0; i < len; i++) new_elems[i + 1] = objects[self_id, "element_" i]
+        array_sort_elements(new_elems, len)
+        return create_array(new_elems, len)
     } else {
         error("Unknown array method: " func_name)
     }
 
     return self_id
+}
+
+# @doc [objects]
+# Dict-style helpers
+# examples:
+# let o = { a: 1, b: 2 };
+# o.keys();          # ["a", "b"]
+# o.values();         # [1, 2]
+# o.has("a");         # true
+# o.remove("a");
+function builtin_object(func_name, args, argc,   self_id, len, i, key, elems, count) {
+    self_id = args[0]
+    if (self_id == "") error("Method " func_name " called without context")
+    len = objects[self_id, "properties_count"]
+
+    if (func_name == "object.keys") {
+        for (i = 1; i <= len; i++) elems[i] = create_value(TYPE_STRING, objects[self_id, "prop_key_" i])
+        return create_array(elems, len)
+    } else if (func_name == "object.values") {
+        for (i = 1; i <= len; i++) elems[i] = objects[self_id, "prop_value_" i]
+        return create_array(elems, len)
+    } else if (func_name == "object.has") {
+        if (argc != 1) error("has expects 1 argument")
+        key = objects[args[1], "value"]
+        for (i = 1; i <= len; i++) if (objects[self_id, "prop_key_" i] == key) return create_value(TYPE_BOOL, 1)
+        return create_value(TYPE_BOOL, 0)
+    } else if (func_name == "object.remove") {
+        if (argc != 1) error("remove expects 1 argument")
+        key = objects[args[1], "value"]
+        count = 0
+        for (i = 1; i <= len; i++) {
+            if (objects[self_id, "prop_key_" i] == key) continue
+            count++
+            objects[self_id, "prop_key_" count] = objects[self_id, "prop_key_" i]
+            objects[self_id, "prop_value_" count] = objects[self_id, "prop_value_" i]
+        }
+        for (i = count + 1; i <= len; i++) {
+            delete objects[self_id, "prop_key_" i]
+            delete objects[self_id, "prop_value_" i]
+        }
+        objects[self_id, "properties_count"] = count
+        return create_value(TYPE_NULL, "null")
+    }
+    error("Unknown object method: " func_name)
+}
+
+function array_sort_elements(elems, len,   i, j, key, key_val) {
+    for (i = 2; i <= len; i++) {
+        key = elems[i]
+        key_val = objects[key, "value"]
+        j = i - 1
+        while (j >= 1 && objects[elems[j], "value"] > key_val) {
+            elems[j + 1] = elems[j]
+            j--
+        }
+        elems[j + 1] = key
+    }
+}
+
+function values_equal(a_id, b_id) {
+    if (objects[a_id, "type"] != objects[b_id, "type"]) return 0
+    if (objects[a_id, "type"] == TYPE_ARRAY) return compare_arrays(a_id, b_id)
+    return objects[a_id, "value"] == objects[b_id, "value"]
 }
 
 # @doc [builtins]
@@ -1815,7 +2291,7 @@ function builtin_array(func_name, args, argc,  self_id, self_value) {
 # id(42)  # returns the unique identifier of the integer 42
 # id([1, 2, 3])  # returns the unique identifier of the array [1, 2, 3]
 function builtin_id(args, argc,   i, output) {
-    debug_msg("Executing builtin id with " argc " arguments")
+    if (debug) debug_msg("Executing builtin id with " argc " arguments")
     if (argc != 1) error("type expects 1 argument")
     return create_value(TYPE_STRING, args[1])
 }
@@ -1829,7 +2305,7 @@ function builtin_id(args, argc,   i, output) {
 # print(value, " - ", value2)   # prints values with custom separator
 # print("Value:", value, "is of type", type(value))  # prints value and its type
 function builtin_print(args, argc,   i, output) {
-    debug_msg("Executing builtin print with " argc " arguments")
+    if (debug) debug_msg("Executing builtin print with " argc " arguments")
     output = ""
     for (i = 1; i <= argc; i++) {
         if (i > 1) output = output " "
@@ -1846,10 +2322,20 @@ function builtin_print(args, argc,   i, output) {
 # type(3.14)  # returns "float"
 # type("hello")  # returns "string"
 # type([1, 2, 3])  # returns "array"
-function builtin_type(args, argc,   arg_type) {
-    debug_msg("Executing builtin type with " argc " arguments")
+function builtin_type(args, argc,   arg_type, val_id, proto_id) {
+    if (debug) debug_msg("Executing builtin type with " argc " arguments")
     if (argc != 1) error("type expects 1 argument")
-    arg_type = objects[args[1], "type"]
+    val_id = args[1]
+    arg_type = objects[val_id, "type"]
+
+    if (arg_type == TYPE_STRUCT) {
+        proto_id = objects[val_id, "prototype"]
+        if (proto_id != "") return create_value(TYPE_STRING, objects[proto_id, "struct_name"])
+        if (objects[val_id, "struct_name"] != "") return create_value(TYPE_STRING, objects[val_id, "struct_name"])
+    } else if (arg_type == TYPE_ENUM) {
+        return create_value(TYPE_STRING, objects[val_id, "enum_name"])
+    }
+
     return create_value(TYPE_STRING, arg_type)
 }
 
@@ -1859,7 +2345,7 @@ function builtin_type(args, argc,   arg_type) {
 # len("hello")  # returns 5
 # len([1, 2, 3, 4])  # returns 4
 function builtin_len(args, argc,   arg, arg_type) {
-    debug_msg("Executing builtin len with " argc " arguments")
+    if (debug) debug_msg("Executing builtin len with " argc " arguments")
     if (argc != 1) error("len expects 1 argument")
     arg = args[1]
     arg_type = objects[arg, "type"]
@@ -1880,7 +2366,7 @@ function builtin_len(args, argc,   arg, arg_type) {
 # let empty_arr = []
 # let last = pop(empty_arr)  # last = null, empty_arr = []
 function builtin_pop(args, argc,   target_id, target_type, len, last_index, res) {
-    debug_msg("builtin_pop starts")
+    if (debug) debug_msg("builtin_pop starts")
     if (argc != 1) error("pop expects 1 argument")
 
     target_id = args[1]
@@ -1889,7 +2375,7 @@ function builtin_pop(args, argc,   target_id, target_type, len, last_index, res)
 
     len = objects[target_id, "length"]
     if (len == 0) {
-        debug_msg("pop: array " target_id " is empty")
+        if (debug) debug_msg("pop: array " target_id " is empty")
         return create_value(TYPE_NULL, "null")
     }
 
@@ -1898,7 +2384,7 @@ function builtin_pop(args, argc,   target_id, target_type, len, last_index, res)
     delete objects[target_id, "element_" last_index]
     objects[target_id, "length"] = last_index
 
-    debug_msg("pop: removed element " res " from array " target_id ", new length = " last_index)
+    if (debug) debug_msg("pop: removed element " res " from array " target_id ", new length = " last_index)
     return res
 }
 
@@ -1910,7 +2396,7 @@ function builtin_pop(args, argc,   target_id, target_type, len, last_index, res)
 # let empty_arr = []
 # clear(empty_arr)  # empty_arr = []
 function builtin_clear(args, argc,   target_id, target_type, len, last_index, res) {
-    debug_msg("builtin_clear starts")
+    if (debug) debug_msg("builtin_clear starts")
     if (argc != 1) error("clear expects 1 argument")
 
     target_id = args[1]
@@ -1921,7 +2407,7 @@ function builtin_clear(args, argc,   target_id, target_type, len, last_index, re
             delete objects[target_id, "element_" i]
         }
         objects[target_id, "length"] = 0
-        debug_msg("clear: array " target_id " cleared")
+        if (debug) debug_msg("clear: array " target_id " cleared")
         return create_value(TYPE_NULL, "null")
     }
 }
@@ -1932,7 +2418,7 @@ function builtin_clear(args, argc,   target_id, target_type, len, last_index, re
 # assert(x > 0, "x must be positive")  # raises error if x <= 0
 # assert(value)  # raises error if value is false or null
 function builtin_assert(args, argc,   condition, cond_type, cond_val, is_false, msg) {
-    debug_msg("builtin_assert called")
+    if (debug) debug_msg("builtin_assert called")
     if (argc < 1) error("assert expects at least 1 argument")
 
     condition = args[1]
@@ -1952,7 +2438,7 @@ function builtin_assert(args, argc,   condition, cond_type, cond_val, is_false, 
             msg = value_to_string(args[2])
         else
             msg = "Assertion failed"
-        print "AssertionError: " msg > "/dev/stderr"
+        print "AssertionError: " msg > STD_ERR
         exit(1)
     }
 
@@ -1965,7 +2451,7 @@ function builtin_assert(args, argc,   condition, cond_type, cond_val, is_false, 
 # let arr = [1, 2, 3, 4, 5]
 # let even_arr = filter(arr, lambda x: x % 2 == 0)  # even_arr = [2, 4]
 function builtin_filter(args, argc,   arr_id, func_id, result_id, i, len, elem_id, filter_args, filter_result, result_count) {
-    debug_msg("builtin_filter called")
+    if (debug) debug_msg("builtin_filter called")
     if (argc != 2) error("filter expects 2 arguments: array and function")
 
     arr_id = args[1]
@@ -1981,6 +2467,8 @@ function builtin_filter(args, argc,   arr_id, func_id, result_id, i, len, elem_i
 
     result_id = create_value(TYPE_ARRAY, "")
     result_count = 0
+    eval_protect_count++
+    eval_protect_stack[eval_protect_count] = result_id
 
     len = objects[arr_id, "length"]
     for (i = 0; i < len; i++) {
@@ -1998,14 +2486,16 @@ function builtin_filter(args, argc,   arr_id, func_id, result_id, i, len, elem_i
         if (objects[filter_result, "type"] == TYPE_BOOL && objects[filter_result, "value"] == 1) {
             objects[result_id, "element_" result_count] = elem_id
             result_count++
+            objects[result_id, "length"] = result_count
         } else if (objects[filter_result, "type"] == TYPE_INT && objects[filter_result, "value"] != 0) {
             objects[result_id, "element_" result_count] = elem_id
             result_count++
+            objects[result_id, "length"] = result_count
         }
     }
 
     objects[result_id, "length"] = result_count
-    debug_msg("filter: created array with " result_count " elements")
+    if (debug) debug_msg("filter: created array with " result_count " elements")
 
     return result_id
 }
@@ -2016,7 +2506,7 @@ function builtin_filter(args, argc,   arr_id, func_id, result_id, i, len, elem_i
 # let arr = [1, 2, 3]
 # let squared_arr = map(arr, lambda x: x * x)  # squared_arr = [1, 4, 9]
 function builtin_map(args, argc,   arr_id, func_id, result_id, i, len, elem_id, map_args, map_result) {
-    debug_msg("builtin_map called")
+    if (debug) debug_msg("builtin_map called")
     if (argc != 2) error("map expects 2 arguments: array and function")
 
     arr_id = args[1]
@@ -2032,6 +2522,8 @@ function builtin_map(args, argc,   arr_id, func_id, result_id, i, len, elem_id, 
 
     result_id = create_value(TYPE_ARRAY, "")
     len = objects[arr_id, "length"]
+    eval_protect_count++
+    eval_protect_stack[eval_protect_count] = result_id
 
     for (i = 0; i < len; i++) {
         elem_id = objects[arr_id, "element_" i]
@@ -2046,10 +2538,11 @@ function builtin_map(args, argc,   arr_id, func_id, result_id, i, len, elem_id, 
         }
 
         objects[result_id, "element_" i] = map_result
+        objects[result_id, "length"] = i + 1
     }
 
     objects[result_id, "length"] = len
-    debug_msg("map: created array with " len " elements")
+    if (debug) debug_msg("map: created array with " len " elements")
 
     return result_id
 }
@@ -2060,7 +2553,7 @@ function builtin_map(args, argc,   arr_id, func_id, result_id, i, len, elem_id, 
 # let arr = [1, 2, 3, 4]
 # let sum = reduce(arr, lambda acc, x: acc + x, 0)  # sum = 10
 function builtin_reduce(args, argc,   arr_id, func_id, acc_id, i, len, elem_id, reduce_args) {
-    debug_msg("builtin_reduce called")
+    if (debug) debug_msg("builtin_reduce called")
     if (argc != 3) error("reduce expects 3 arguments: array, function, and initial value")
 
     arr_id = args[1]
@@ -2095,12 +2588,12 @@ function builtin_reduce(args, argc,   arr_id, func_id, acc_id, i, len, elem_id, 
 }
 
 # @doc [builtins]
-# Creates an array containing a range of integers.
+# Creates a lazy iterator over a range of integers
 # examples:
-# let arr = range(5)  # arr = [0, 1, 2, 3, 4]
-# let arr2 = range(2, 6)  # arr2 = [2, 3, 4, 5]
-function builtin_range(args, argc,   start_id, end_id, start_val, end_val, target_id, value_id, target_type, len, i) {
-    debug_msg("builtin_range called")
+# for (let i in range(5)) { print(i) }  # 0 1 2 3 4
+# for (let i in range(2, 6)) { print(i) }  # 2 3 4 5
+function builtin_range(args, argc,   start_id, end_id, start_val, end_val, id) {
+    if (debug) debug_msg("builtin_range called")
     if (argc < 1) error("range expects at least 1 argument")
 
     if (argc == 1) {
@@ -2116,17 +2609,69 @@ function builtin_range(args, argc,   start_id, end_id, start_val, end_val, targe
         end_val = objects[end_id, "value"]
     }
 
-    for (i = start_val; i < end_val; i++) {
-        element_ids[i - start_val + 1] = create_value(TYPE_INT, i)
-    }
-
-    array_id = create_array(element_ids, end_val - start_val)
-    debug_msg("range: created array with " (end_val - start_val) " elements")
-    return array_id
+    id = create_value(TYPE_ITERATOR, "")
+    objects[id, "kind"] = "range"
+    objects[id, "current"] = start_val
+    objects[id, "end"] = end_val
+    if (debug) debug_msg("range: created lazy iterator from " start_val " to " end_val)
+    return id
 }
 
-function create_instance(type_id, constructor_args, argc,   inst_id, i, prop_count, prop_node, prop_name, prop_value, obj_node) {
-    debug_msg("Creating instance of type " objects[type_id, "type"])
+# @doc [builtins]
+# Explicit type conversion. int()/float() accept int, float, bool, or string
+# examples:
+# int("42")    # 42
+# float("3.5") # 3.5
+# str(42)      # "42"
+function builtin_int(args, argc,   t, v) {
+    if (argc != 1) error("int expects 1 argument")
+    t = objects[args[1], "type"]
+    v = objects[args[1], "value"]
+    if (t == TYPE_BOOL) return create_value(TYPE_INT, v ? 1 : 0)
+    if (t == TYPE_INT || t == TYPE_FLOAT || t == TYPE_STRING) return create_value(TYPE_INT, int(v + 0))
+    error("Cannot convert type '" t "' to int")
+}
+
+function builtin_float(args, argc,   t, v) {
+    if (argc != 1) error("float expects 1 argument")
+    t = objects[args[1], "type"]
+    v = objects[args[1], "value"]
+    if (t == TYPE_BOOL) return create_value(TYPE_FLOAT, v ? 1 : 0)
+    if (t == TYPE_INT || t == TYPE_FLOAT || t == TYPE_STRING) return create_value(TYPE_FLOAT, v + 0)
+    error("Cannot convert type '" t "' to float")
+}
+
+function builtin_str(args, argc) {
+    if (argc != 1) error("str expects 1 argument")
+    return create_value(TYPE_STRING, value_to_string(args[1]))
+}
+
+# @doc [builtins]
+# printf-style formatting up to 5 value args for now
+# examples:
+# format("%.2f", 3.14159)      # "3.14"
+# format("%5d", 3)             # "    3"
+# format("%s is %d", "age", 9) # "age is 9"
+function builtin_format(args, argc,   fmt, v2, v3, v4, v5, v6) {
+    if (argc < 1) error("format expects at least 1 argument (the format string)")
+    fmt = objects[args[1], "value"]
+    if (argc == 1) return create_value(TYPE_STRING, sprintf(fmt))
+    v2 = objects[args[2], "value"]
+    if (argc == 2) return create_value(TYPE_STRING, sprintf(fmt, v2))
+    v3 = objects[args[3], "value"]
+    if (argc == 3) return create_value(TYPE_STRING, sprintf(fmt, v2, v3))
+    v4 = objects[args[4], "value"]
+    if (argc == 4) return create_value(TYPE_STRING, sprintf(fmt, v2, v3, v4))
+    v5 = objects[args[5], "value"]
+    if (argc == 5) return create_value(TYPE_STRING, sprintf(fmt, v2, v3, v4, v5))
+    v6 = objects[args[6], "value"]
+    if (argc == 6) return create_value(TYPE_STRING, sprintf(fmt, v2, v3, v4, v5, v6))
+    error("format supports at most 5 value arguments")
+}
+
+function create_instance(type_id, constructor_args, argc,   inst_id, i, j, prop_count, prop_node, prop_name, prop_value, obj_node,
+                          def_id, def_count, def_name, def_prop, def_type, def_nullable, have_it, count, walk_type_id) {
+    if (debug) debug_msg("Creating instance of type " objects[type_id, "type"])
     inst_id = ++object_counter
     objects[inst_id, "type"] = TYPE_STRUCT
     objects[inst_id, "properties_count"] = 0
@@ -2144,7 +2689,33 @@ function create_instance(type_id, constructor_args, argc,   inst_id, i, prop_cou
             objects[inst_id, "prop_key_" i] = prop_name
             objects[inst_id, "prop_value_" i] = prop_value
         }
-        objects[inst_id, "properties_count"] = prop_count
+        count = prop_count
+
+        walk_type_id = type_id
+        while (walk_type_id != "") {
+            def_id = objects[walk_type_id, "definition"]
+            def_count = ast_nodes[def_id, "properties_count"]
+            for (i = 1; i <= def_count; i++) {
+                def_prop = ast_nodes[def_id, "property_" i]
+                def_name = ast_nodes[def_prop, "name"]
+                def_type = ast_nodes[def_prop, "declared_type"]
+                def_nullable = ast_nodes[def_prop, "nullable"]
+                have_it = 0
+                for (j = 1; j <= count; j++) {
+                    if (objects[inst_id, "prop_key_" j] == def_name) { have_it = 1; break }
+                }
+                if (have_it) {
+                    if (def_type != "") check_declared_type(objects[inst_id, "prop_value_" j], def_type, def_nullable, def_name)
+                } else {
+                    count++
+                    objects[inst_id, "prop_key_" count] = def_name
+                    objects[inst_id, "prop_value_" count] = create_value(TYPE_NULL, "null")
+                    if (def_type != "") check_declared_type(objects[inst_id, "prop_value_" count], def_type, def_nullable, def_name)
+                }
+            }
+            walk_type_id = objects[walk_type_id, "parent"]
+        }
+        objects[inst_id, "properties_count"] = count
     } else {
         error("Cannot instantiate non-struct type")
     }
@@ -2153,7 +2724,7 @@ function create_instance(type_id, constructor_args, argc,   inst_id, i, prop_cou
 }
 
 function parse_lambda(   lambda_node, param_count) {
-    debug_msg("Parsing lambda expression")
+    if (debug) debug_msg("Parsing lambda expression")
 
     lambda_node = ++ast_node_counter
     ast_nodes[lambda_node, "type"] = "LambdaExpression"
@@ -2163,18 +2734,18 @@ function parse_lambda(   lambda_node, param_count) {
     param_count = 0
 
     while (get_token_value() != ":") {
-        debug_msg("Lambda param loop: token_type=" get_token_type() " token_value=[" get_token_value() "]")
+        if (debug) debug_msg("Lambda param loop: token_type=" get_token_type() " token_value=[" get_token_value() "]")
         
         if (get_token_type() != "IDENTIFIER") {
             error("Expected parameter name in lambda, got " get_token_type() " '" get_token_value() "'")
         }
 
         ast_nodes[lambda_node, "param_" param_count] = get_token_value()
-        debug_msg("Added lambda param: " get_token_value())
+        if (debug) debug_msg("Added lambda param: " get_token_value())
         param_count++
         advance_token()
 
-        debug_msg("After advance: token_type=" get_token_type() " token_value=[" get_token_value() "]")
+        if (debug) debug_msg("After advance: token_type=" get_token_type() " token_value=[" get_token_value() "]")
 
         if (get_token_value() == ",") {
             advance_token()
@@ -2185,12 +2756,12 @@ function parse_lambda(   lambda_node, param_count) {
 
     ast_nodes[lambda_node, "param_count"] = param_count
 
-    debug_msg("About to expect : token")
+    if (debug) debug_msg("About to expect : token")
     expect_token("OPERATOR", ":")
 
     ast_nodes[lambda_node, "body"] = parse_assignment()
 
-    debug_msg("Lambda parsed with " param_count " parameters")
+    if (debug) debug_msg("Lambda parsed with " param_count " parameters")
 
     return lambda_node
 }
@@ -2205,7 +2776,7 @@ function parse_lambda(   lambda_node, param_count) {
 #   internal();
 # }
 function create_closure(func_def_id, closure_scope_id,   closure_id) {
-    debug_msg("Creating closure for function definition " func_def_id " with closure scope " closure_scope_id)
+    if (debug) debug_msg("Creating closure for function definition " func_def_id " with closure scope " closure_scope_id)
     closure_id = ++object_counter
     objects[closure_id, "type"] = TYPE_FUNCTION
     objects[closure_id, "definition"] = func_def_id
@@ -2213,12 +2784,12 @@ function create_closure(func_def_id, closure_scope_id,   closure_id) {
     objects[closure_id, "is_closure"] = 1
 
     register_object(closure_id)
-    debug_msg("Created closure with id " closure_id)
+    if (debug) debug_msg("Created closure with id " closure_id)
     return closure_id
 }
 
 function parse_array_literal(   array_node, elem_node, count) {
-    debug_msg("Parsing array literal")
+    if (debug) debug_msg("Parsing array literal")
     array_node = ++ast_node_counter
     ast_nodes[array_node, "type"] = "ArrayExpression"
     ast_nodes[array_node, "elements_count"] = 0
@@ -2246,7 +2817,7 @@ function parse_array_literal(   array_node, elem_node, count) {
 # let int_arr = [1, 2, 3]; # int array
 # let combined_array = [1, "some-string", [8734, "kek"]]; combined array
 function create_array(element_ids, count,   array_id, i) {
-    debug_msg("Creating array with " count " elements")
+    if (debug) debug_msg("Creating array with " count " elements")
     array_id = ++object_counter
     objects[array_id, "type"] = TYPE_ARRAY
     objects[array_id, "length"] = count
@@ -2260,7 +2831,7 @@ function create_array(element_ids, count,   array_id, i) {
 }
 
 function parse_object_literal(   obj_node, key, value_node, prop_node) {
-    debug_msg("Parsing object literal")
+    if (debug) debug_msg("Parsing object literal")
     obj_node = ++ast_node_counter
     ast_nodes[obj_node, "type"] = "ObjectExpression"
     ast_nodes[obj_node, "properties_count"] = 0
@@ -2273,7 +2844,11 @@ function parse_object_literal(   obj_node, key, value_node, prop_node) {
                 key = unescape_string(substr(key, 2, length(key) - 2))
             }
             advance_token()
-            expect_token("OPERATOR", "=")
+            if (get_token_value() == ":") {
+                expect_token("OPERATOR", ":")
+            } else {
+                expect_token("OPERATOR", "=")
+            }
             value_node = parse_expression()
             prop_node = ++ast_node_counter
             ast_nodes[prop_node, "type"] = "Property"
@@ -2300,7 +2875,7 @@ function parse_object_literal(   obj_node, key, value_node, prop_node) {
 #   print("Error: " + error);
 # }
 function parse_try_statement(   try_node) {
-    debug_msg("Parsing try statement")
+    if (debug) debug_msg("Parsing try statement")
     try_node = ++ast_node_counter
     ast_nodes[try_node, "type"] = "TryStatement"
     advance_token()
@@ -2324,13 +2899,51 @@ function parse_try_statement(   try_node) {
     return try_node
 }
 
+# @doc [control_flow]
+# Throws a value as an exception
+# examples:
+# struct NotFoundError { message; };
+# fn find(id) {
+#   if (id != 1) { throw new NotFoundError{message="missing"}; }
+#   return "found";
+# }
+# try { find(2); } catch (e) { print(e.message); }  # 404 missing
+function parse_throw_statement(   throw_node) {
+    if (debug) debug_msg("Parsing throw statement")
+    throw_node = ++ast_node_counter
+    ast_nodes[throw_node, "type"] = "ThrowStatement"
+    advance_token()
+    ast_nodes[throw_node, "argument"] = parse_expression()
+    expect_token("DELIMITER", ";")
+    return throw_node
+}
+
+function execute_throw_statement(throw_node,   value_id) {
+    if (debug) debug_msg("Executing throw statement")
+    value_id = execute(ast_nodes[throw_node, "argument"])
+    throw_value(value_id)
+    return create_value(TYPE_NULL, "null")
+}
+
+function throw_value(value_id) {
+    if (current_exception_handler != "") {
+        error_occurred = 1
+        thrown_value_id = value_id
+        last_exception = value_to_string(value_id)
+        if (debug) debug_msg("Thrown: " last_exception)
+        return
+    }
+    error(value_to_string(value_id))
+}
+
 ERROR_ID = -1
 
 function execute_with_error_check(node,   old_error_state, temp_result) {
-    debug_msg("Executing node with error check: " node)
+    if (debug) debug_msg("Executing node with error check: " node)
     old_error_state = error_occurred
     error_occurred = 0
     last_exception = ""
+    thrown_value_id = ""
 
     temp_result = execute(node)
     if (error_occurred) {
@@ -2342,19 +2955,21 @@ function execute_with_error_check(node,   old_error_state, temp_result) {
     }
 }
 
-function execute_try_statement(try_node,   old_exception_handler, result_id, exception_occurred, exception_value, old_scope_id, block_result, handler_result, finalizer_result) {
-    debug_msg("Executing try statement")
+function execute_try_statement(try_node,   old_exception_handler, result_id, exception_occurred, exception_value, exception_value_id, old_scope_id, block_result, handler_result, finalizer_result) {
+    if (debug) debug_msg("Executing try statement")
     old_exception_handler = current_exception_handler
     current_exception_handler = try_node
 
     result_id = create_value(TYPE_NULL, "null")
     exception_occurred = 0
     exception_value = ""
+    exception_value_id = ""
 
     block_result = execute_with_error_check(ast_nodes[try_node, "block"])
     if (block_result == ERROR_ID) {
         exception_occurred = 1
         exception_value = last_exception
+        exception_value_id = thrown_value_id
         result_id = create_value(TYPE_NULL, "null")
     } else {
         result_id = block_result
@@ -2365,7 +2980,8 @@ function execute_try_statement(try_node,   old_exception_handler, result_id, exc
         current_scope_id = new_scope(current_scope_id)
 
         if (ast_nodes[try_node, "param"] != "") {
-            declare_variable(ast_nodes[try_node, "param"], create_value(TYPE_STRING, exception_value))
+            declare_variable(ast_nodes[try_node, "param"],
+                exception_value_id != "" ? exception_value_id : create_value(TYPE_STRING, exception_value))
         }
 
         handler_result = execute_with_error_check(ast_nodes[try_node, "handler"])
@@ -2384,7 +3000,11 @@ function execute_try_statement(try_node,   old_exception_handler, result_id, exc
     current_exception_handler = old_exception_handler
 
     if (exception_occurred) {
-        error(exception_value)
+        if (exception_value_id != "") {
+            throw_value(exception_value_id)
+        } else {
+            error(exception_value)
+        }
     }
 
     return result_id
@@ -2397,7 +3017,7 @@ function execute_try_statement(try_node,   old_exception_handler, result_id, exc
 # import system as sys  # import system module with alias
 # import my_module  # import custom user modele
 function parse_import(   import_node, module_name, alias_name, expr_stmt_node) {
-    debug_msg("Parsing import declaration")
+    if (debug) debug_msg("Parsing import declaration")
     import_node = ++ast_node_counter
     ast_nodes[import_node, "type"] = "ImportDeclaration"
     advance_token()
@@ -2416,23 +3036,23 @@ function parse_import(   import_node, module_name, alias_name, expr_stmt_node) {
     if (get_token_value() == "as") {
         advance_token()
         alias_name = get_token_value()
-        debug_msg("Parsed alias: '" alias_name "'")
+        if (debug) debug_msg("Parsed alias: '" alias_name "'")
         advance_token()
     } else {
-        debug_msg("No 'as' keyword found")
+        if (debug) debug_msg("No 'as' keyword found")
     }
 
     ast_nodes[import_node, "source"] = module_name
     ast_nodes[import_node, "default"] = alias_name
 
-    debug_msg("Parsed import: source='" module_name "' alias='" alias_name "'")
+    if (debug) debug_msg("Parsed import: source='" module_name "' alias='" alias_name "'")
 
     if ((module_name) in BUILTIN_MODULES) {
         ast_nodes[import_node, "builtin"] = 1
-        debug_msg("Using builtin module: " module_name)
+        if (debug) debug_msg("Using builtin module: " module_name)
     } else {
         ast_nodes[import_node, "builtin"] = 0
-        debug_msg("Using user module: " module_name)
+        if (debug) debug_msg("Using user module: " module_name)
     }
 
     expr_stmt_node = ++ast_node_counter
@@ -2443,7 +3063,7 @@ function parse_import(   import_node, module_name, alias_name, expr_stmt_node) {
 }
 
 function execute_import_declaration(node,   module_name, default_name, value_id) {
-    debug_msg("Executing import declaration")
+    if (debug) debug_msg("Executing import declaration")
     module_name = ast_nodes[node, "source"]
 
     if (ast_nodes[node, "builtin"]) {
@@ -2464,7 +3084,7 @@ function load_user_module(module_name,   file_path, code,
                           token_count, prog_node, saved_scope, module_scope_id, 
                           module_obj_id, i, key) {
 
-    debug_msg("Loading user module: " module_name)
+    if (debug) debug_msg("Loading user module: " module_name)
 
     file_path = resolve_module_path(module_name)
 
@@ -2490,15 +3110,13 @@ function load_user_module(module_name,   file_path, code,
     prog_node = parse(tokens, token_count)
 
     saved_scope = current_scope_id
-    module_scope_id = ++scope_counter
-    scopes[module_scope_id, "parent"] = global_scope_id
-    scopes[module_scope_id, "variables_count"] = 0
+    module_scope_id = new_scope(global_scope_id)
     current_scope_id = module_scope_id
 
-    debug_msg("Created module scope: " module_scope_id)
+    if (debug) debug_msg("Created module scope: " module_scope_id)
 
     execute(prog_node)
-    debug_msg("After executing module, checking scope " module_scope_id)
+    if (debug) debug_msg("After executing module, checking scope " module_scope_id)
 
     module_obj_id = collect_module_variables(module_scope_id)
     current_scope_id = saved_scope
@@ -2520,15 +3138,15 @@ function load_user_module(module_name,   file_path, code,
         ast_nodes[key] = saved_ast_nodes[key]
     }
 
-    debug_msg("Loaded module: " module_name " as object " module_obj_id)
+    if (debug) debug_msg("Loaded module: " module_name " as object " module_obj_id)
     return module_obj_id
 }
 
 function collect_module_variables(scope_id,   obj_id, key, var_name, var_value, prop_count, pattern) {
-    debug_msg("Collecting variables from module scope " scope_id)
+    if (debug) debug_msg("Collecting variables from module scope " scope_id)
 
     pattern = "^" scope_id SUBSEP "var_"
-    debug_msg("Looking for pattern: '" pattern "'")
+    if (debug) debug_msg("Looking for pattern: '" pattern "'")
 
     obj_id = ++object_counter
     objects[obj_id, "type"] = TYPE_OBJECT
@@ -2542,7 +3160,7 @@ function collect_module_variables(scope_id,   obj_id, key, var_name, var_value, 
     }
 
     objects[obj_id, "properties_count"] = prop_count
-    debug_msg("Module has " prop_count " properties")
+    if (debug) debug_msg("Module has " prop_count " properties")
 
     prop_count = 0
     for (key in scopes) {
@@ -2558,7 +3176,7 @@ function collect_module_variables(scope_id,   obj_id, key, var_name, var_value, 
     }
 
     register_object(obj_id)
-    debug_msg("Created module object " obj_id " with " prop_count " properties")
+    if (debug) debug_msg("Created module object " obj_id " with " prop_count " properties")
     return obj_id
 }
 
@@ -2578,7 +3196,7 @@ function resolve_module_path(module_name,   path, lib_path) {
         }
     }
 
-    debug_msg("Resolved module path: " path)
+    if (debug) debug_msg("Resolved module path: " path)
 
     return path
 }
@@ -2590,7 +3208,7 @@ function file_exists(filename,   ret, line) {
 }
 
 function parse_block_statement(   block_node, stmt_node) {
-    debug_msg("Parsing block statement")
+    if (debug) debug_msg("Parsing block statement")
     block_node = ++ast_node_counter
     ast_nodes[block_node, "type"] = "BlockStatement"
     ast_nodes[block_node, "body_count"] = 0
@@ -2601,7 +3219,7 @@ function parse_block_statement(   block_node, stmt_node) {
         stmt_node = parse_statement()
         if (stmt_node != "") {
             ast_nodes[block_node, "body_" ++ast_nodes[block_node, "body_count"]] = stmt_node
-            debug_msg("Added to block " block_node ": node " stmt_node " of type " ast_nodes[stmt_node, "type"] (ast_nodes[stmt_node, "name"] ? " name " ast_nodes[stmt_node, "name"] : ""))
+            if (debug) debug_msg("Added to block " block_node ": node " stmt_node " of type " ast_nodes[stmt_node, "type"] (ast_nodes[stmt_node, "name"] ? " name " ast_nodes[stmt_node, "name"] : ""))
         }
     }
 
@@ -2609,8 +3227,8 @@ function parse_block_statement(   block_node, stmt_node) {
     return block_node
 }
 
-function execute_block_statement(block_node,   old_scope_id, result_id, i, n) {
-    debug_msg("Executing block statement")
+function execute_block_statement(block_node,   old_scope_id, result_id, i, n, stmt_node) {
+    if (debug) debug_msg("Executing block statement")
     old_scope_id = current_scope_id
     current_scope_id = new_scope(current_scope_id)
 
@@ -2618,7 +3236,10 @@ function execute_block_statement(block_node,   old_scope_id, result_id, i, n) {
     n = ast_nodes[block_node, "body_count"]
 
     for (i = 1; i <= n; i++) {
-        result_id = execute(ast_nodes[block_node, "body_" i])
+        stmt_node = ast_nodes[block_node, "body_" i]
+        if (ast_nodes[stmt_node, "line"] != "") current_line = ast_nodes[stmt_node, "line"]
+        result_id = execute(stmt_node)
+        clear_eval_protection()
         if (return_value_set || break_flag || continue_flag || error_occurred)
             break
     }
@@ -2634,7 +3255,7 @@ function execute_block_statement(block_node,   old_scope_id, result_id, i, n) {
 # return 42;    # return some value
 # return x + y; # return result
 function parse_return_statement(   ret_node) {
-    debug_msg("Parsing return statement")
+    if (debug) debug_msg("Parsing return statement")
     ret_node = ++ast_node_counter
     ast_nodes[ret_node, "type"] = "ReturnStatement"
     advance_token()
@@ -2648,7 +3269,7 @@ function parse_return_statement(   ret_node) {
 }
 
 function execute_return_statement(ret_node,   arg_id) {
-    debug_msg("Executing return statement")
+    if (debug) debug_msg("Executing return statement")
     arg_id = ast_nodes[ret_node, "argument"]
 
     if (arg_id != "") {
@@ -2680,7 +3301,7 @@ function execute_return_statement(ret_node,   arg_id) {
 #   print("F");
 # }
 function parse_if_statement(   if_node) {
-    debug_msg("Parsing if statement")
+    if (debug) debug_msg("Parsing if statement")
     if_node = ++ast_node_counter
     ast_nodes[if_node, "type"] = "IfStatement"
     advance_token()
@@ -2704,7 +3325,7 @@ function parse_if_statement(   if_node) {
 }
 
 function execute_if_statement(if_node,   test_id, test_val_id, result_id) {
-    debug_msg("Executing if statement")
+    if (debug) debug_msg("Executing if statement")
     test_id = ast_nodes[if_node, "test"]
     test_val_id = execute(test_id)
     if (to_bool(test_val_id)) {
@@ -2729,7 +3350,7 @@ function execute_if_statement(if_node,   test_id, test_val_id, result_id) {
 #     i = i + 1;
 # }
 function parse_while_statement(   while_node) {
-    debug_msg("Parsing while statement")
+    if (debug) debug_msg("Parsing while statement")
     while_node = ++ast_node_counter
     ast_nodes[while_node, "type"] = "WhileStatement"
     advance_token()
@@ -2753,7 +3374,7 @@ function parse_while_statement(   while_node) {
 #     process(item);
 # }
 function parse_for_statement(   for_node) {
-    debug_msg("Parsing for-in statement")
+    if (debug) debug_msg("Parsing for-in statement")
     for_node = ++ast_node_counter
     ast_nodes[for_node, "type"] = "ForInStatement"
 
@@ -2780,7 +3401,7 @@ function parse_for_statement(   for_node) {
 }
 
 function execute_while_statement(while_node,   test_id, body_id, test_val_id, result_id) {
-    debug_msg("Executing while statement")
+    if (debug) debug_msg("Executing while statement")
     result_id = create_value(TYPE_NULL, "null")
     test_id = ast_nodes[while_node, "test"]
     body_id = ast_nodes[while_node, "body"]
@@ -2788,6 +3409,7 @@ function execute_while_statement(while_node,   test_id, body_id, test_val_id, re
         test_val_id = execute(test_id)
         if (!to_bool(test_val_id)) break
         result_id = execute(body_id)
+        clear_eval_protection()
         if (control_flow_active()) {
             if (continue_flag) {
                 continue_flag = 0
@@ -2804,8 +3426,9 @@ function execute_while_statement(while_node,   test_id, body_id, test_val_id, re
 }
 
 function execute_for_in_statement(for_node,   var_name, iterable_node, iterable_val_id,
-                                  body_node, result_id, i, var_id, parent_scope_id, loop_scope_id) {
-    debug_msg("Executing for-in statement")
+                                  body_node, result_id, i, var_id, parent_scope_id, loop_scope_id,
+                                  next_method_id, next_args, next_result) {
+    if (debug) debug_msg("Executing for-in statement")
 
     result_id = create_value(TYPE_NULL, "null")
 
@@ -2818,16 +3441,20 @@ function execute_for_in_statement(for_node,   var_name, iterable_node, iterable_
     if (objects[iterable_val_id, "type"] == TYPE_VARIABLE)
         iterable_val_id = objects[iterable_val_id, "value"]
 
-    if (objects[iterable_val_id, "type"] != TYPE_ARRAY && objects[iterable_val_id, "type"] != TYPE_STRUCT) {
+    gc_protect_id = iterable_val_id
+    next_method_id = get_iterator_next_method(iterable_val_id)
+    gc_protect_id = ""
+
+    if (next_method_id == "" && objects[iterable_val_id, "type"] != TYPE_ARRAY && objects[iterable_val_id, "type"] != TYPE_STRUCT) {
         runtime_error("Cannot iterate over non-array or non-struct value in for-in loop")
         return result_id
     }
 
     parent_scope_id = current_scope_id
 
-    loop_scope_id = ++scope_counter
-    scopes[loop_scope_id, "parent"] = parent_scope_id
-    scopes[loop_scope_id, "variables_count"] = 0
+    loop_scope_id = new_scope(parent_scope_id)
+    declare_variable("__for_in_iterable", iterable_val_id, loop_scope_id)
+    if (next_method_id != "") declare_variable("__for_in_next_method", next_method_id, loop_scope_id)
 
     old_scope_id = current_scope_id
     current_scope_id = loop_scope_id
@@ -2835,12 +3462,36 @@ function execute_for_in_statement(for_node,   var_name, iterable_node, iterable_
     declare_variable(var_name, var_id)
     current_scope_id = old_scope_id
 
-    if (objects[iterable_val_id, "type"] == TYPE_ARRAY) {
+    if (next_method_id != "") {
+        current_scope_id = loop_scope_id
+        while (1) {
+            delete next_args
+            next_result = call_bound_method(next_method_id, next_args, 0)
+            if (objects[next_result, "type"] == TYPE_NULL) break
+            update_variable(var_name, next_result)
+            if (debug) debug_msg("Iterating via next() -> " next_result)
+            execute(body_node)
+            clear_eval_protection()
+            if (control_flow_active()) {
+                if (continue_flag) {
+                    continue_flag = 0
+                    continue
+                }
+                if (break_flag) {
+                    break_flag = 0
+                    break
+                }
+                if (return_value_set || error_occurred) break
+            }
+        }
+        current_scope_id = parent_scope_id
+    } else if (objects[iterable_val_id, "type"] == TYPE_ARRAY) {
         for (i = 0; i < objects[iterable_val_id, "length"]; i++) {
-            debug_msg("Iterating array index " i)
+            if (debug) debug_msg("Iterating array index " i)
             objects[var_id, "value"] = i
             current_scope_id = loop_scope_id
             execute(body_node)
+            clear_eval_protection()
             current_scope_id = parent_scope_id
             if (control_flow_active()) {
                 if (continue_flag) {
@@ -2856,10 +3507,11 @@ function execute_for_in_statement(for_node,   var_name, iterable_node, iterable_
         }
     } else if (objects[iterable_val_id, "type"] == TYPE_STRUCT) {
         for (i = 1; i <= objects[iterable_val_id, "properties_count"]; i++) {
-            debug_msg("Iterating struct key " objects[iterable_val_id, "prop_key_" i])
+            if (debug) debug_msg("Iterating struct key " objects[iterable_val_id, "prop_key_" i])
             objects[var_id, "value"] = objects[iterable_val_id, "prop_key_" i]
             current_scope_id = loop_scope_id
             execute(body_node)
+            clear_eval_protection()
             current_scope_id = parent_scope_id
             if (control_flow_active()) {
                 if (continue_flag) {
@@ -2898,8 +3550,8 @@ function to_bool(val_id,   type, val) {
 # fn greet(name) {
 #     print("Hello, " + name);
 # }
-function parse_function_declaration(   func_node) {
-    debug_msg("Parsing function declaration")
+function parse_function_declaration(   func_node, param_idx) {
+    if (debug) debug_msg("Parsing function declaration")
     func_node = ++ast_node_counter
     ast_nodes[func_node, "type"] = "FunctionDeclaration"
     advance_token()
@@ -2912,12 +3564,40 @@ function parse_function_declaration(   func_node) {
 
     while (get_token_value() != ")") {
         if (get_token_type() == "IDENTIFIER") {
-            ast_nodes[func_node, "param_" ++ast_nodes[func_node, "params_count"]] = get_token_value()
+            param_idx = ++ast_nodes[func_node, "params_count"]
+            ast_nodes[func_node, "param_" param_idx] = get_token_value()
+            ast_nodes[func_node, "param_type_" param_idx] = ""
+            ast_nodes[func_node, "param_nullable_" param_idx] = 0
             advance_token()
+
+            if (get_token_value() == ":") {
+                advance_token()
+                if (get_token_value() == "?") {
+                    ast_nodes[func_node, "param_nullable_" param_idx] = 1
+                    advance_token()
+                }
+                if (get_token_type() != "IDENTIFIER") error("Expected type name after ':'")
+                ast_nodes[func_node, "param_type_" param_idx] = get_token_value()
+                advance_token()
+            }
+
             if (get_token_value() == ",") advance_token()
         }
     }
     advance_token()
+
+    ast_nodes[func_node, "return_type"] = ""
+    ast_nodes[func_node, "return_nullable"] = 0
+    if (get_token_value() == ":") {
+        advance_token()
+        if (get_token_value() == "?") {
+            ast_nodes[func_node, "return_nullable"] = 1
+            advance_token()
+        }
+        if (get_token_type() != "IDENTIFIER") error("Expected type name after ':'")
+        ast_nodes[func_node, "return_type"] = get_token_value()
+        advance_token()
+    }
 
     ast_nodes[func_node, "body"] = parse_block_statement()
 
@@ -2925,7 +3605,7 @@ function parse_function_declaration(   func_node) {
 }
 
 function execute_function_declaration(func_node,   func_name, func_id) {
-    debug_msg("Executing function declaration for " ast_nodes[func_node, "name"])
+    if (debug) debug_msg("Executing function declaration for " ast_nodes[func_node, "name"])
     func_name = ast_nodes[func_node, "name"]
     func_id = create_closure(func_node, current_scope_id)
     objects[func_id, "name"] = func_name
@@ -2933,22 +3613,32 @@ function execute_function_declaration(func_node,   func_name, func_id) {
     return create_value(TYPE_NULL, "null")
 }
 
-function call_function(func_id, args, argc,   func_def, closure_scope, old_scope_id, i, param_name, arg_val, body_id, result_id, old_return_value_set, old_return_value, body_count, bi) {
-    debug_msg("Calling function with id " func_id)
+function call_function(func_id, args, argc,   func_def, closure_scope, old_scope_id, i, param_name, arg_val, body_id, result_id, old_return_value_set, old_return_value, body_count, bi, func_name, saved_current_line, stmt_node) {
+    if (debug) debug_msg("Calling function with id " func_id)
     func_def = objects[func_id, "definition"]
     closure_scope = objects[func_id, "closure_scope"]
     old_scope_id = current_scope_id
     current_scope_id = new_scope(closure_scope)
     if (objects[func_id, "self"] != "") {
         declare_variable("self", objects[func_id, "self"])
-        debug_msg("Bound 'self' to instance " objects[func_id, "self"])
+        if (debug) debug_msg("Bound 'self' to instance " objects[func_id, "self"])
     }
     for (i = 1; i <= ast_nodes[func_def, "params_count"]; i++) {
         param_name = ast_nodes[func_def, "param_" i]
         arg_val = (i <= argc) ? args[i] : create_value(TYPE_NULL, "null")
+        if (ast_nodes[func_def, "param_type_" i] != "") {
+            check_declared_type(arg_val, ast_nodes[func_def, "param_type_" i], ast_nodes[func_def, "param_nullable_" i], param_name)
+        }
         declare_variable(param_name, arg_val)
     }
+
+    func_name = objects[func_id, "name"]
+    if (func_name == "") func_name = "<anonymous>"
     call_stack[++call_stack_size, "scope"] = current_scope_id
+    call_stack[call_stack_size, "name"] = func_name
+    call_stack[call_stack_size, "call_line"] = current_line
+    saved_current_line = current_line
+
     old_return_value_set = return_value_set
     old_return_value = return_value
     return_value_set = 0
@@ -2956,7 +3646,10 @@ function call_function(func_id, args, argc,   func_def, closure_scope, old_scope
     if (ast_nodes[body_id, "type"] == "BlockStatement") {
         body_count = ast_nodes[body_id, "body_count"]
         for (bi = 1; bi <= body_count; bi++) {
-            result_id = execute(ast_nodes[body_id, "body_" bi])
+            stmt_node = ast_nodes[body_id, "body_" bi]
+            if (ast_nodes[stmt_node, "line"] != "") current_line = ast_nodes[stmt_node, "line"]
+            result_id = execute(stmt_node)
+            clear_eval_protection()
             if (return_value_set || break_flag || continue_flag || error_occurred)
                 break
         }
@@ -2966,16 +3659,21 @@ function call_function(func_id, args, argc,   func_def, closure_scope, old_scope
     if (return_value_set) {
         result_id = return_value
     }
+    if (ast_nodes[func_def, "return_type"] != "") {
+        check_declared_type(result_id ? result_id : create_value(TYPE_NULL, "null"),
+            ast_nodes[func_def, "return_type"], ast_nodes[func_def, "return_nullable"], "return value of " func_name "()")
+    }
     return_value_set = old_return_value_set
     return_value = old_return_value
     delete call_stack[call_stack_size]
     call_stack_size--
     current_scope_id = old_scope_id
+    current_line = saved_current_line
     return result_id ? result_id : create_value(TYPE_NULL, "null")
 }
 
 function parse_expression_statement(   expr_stmt_node) {
-    debug_msg("Parsing expression statement")
+    if (debug) debug_msg("Parsing expression statement")
     expr_stmt_node = ++ast_node_counter
     ast_nodes[expr_stmt_node, "type"] = "ExpressionStatement"
     ast_nodes[expr_stmt_node, "expression"] = parse_expression()
@@ -3042,7 +3740,7 @@ function parse_logical_and(   land_left, op, land_right, land_node) {
 # let result = x != y;
 # let flag = (a + b) == (c * d);
 function parse_equality(   eq_left, op, eq_right, eq_node) {
-    debug_msg("Parsing equality expression")
+    if (debug) debug_msg("Parsing equality expression")
     eq_left = parse_relational()
 
     while (get_token_value() == "==" || get_token_value() == "!=") {
@@ -3352,25 +4050,34 @@ function value_to_string(val_id,   type, str, i, len) {
         return str
     } else if (type == TYPE_ENUM) {
         return objects[val_id, "enum_name"] "." objects[val_id, "variant_name"]
+    } else if (type == TYPE_ITERATOR) {
+        return "{" objects[val_id, "current"] "..." objects[val_id, "end"] "}"
+    } else if (type == TYPE_FUNCTION) {
+        return objects[val_id, "type"] ", " val_id
     }
     return objects[val_id, "value"] + ""
 }
 
-function error(message) {
+function error(message,   i) {
     if (current_exception_handler != "") {
         error_occurred = 1
         last_exception = message
-        debug_msg("Error occurred: " message)
+        if (debug) debug_msg("Error occurred: " message)
         return
     }
 
-    print "Error: " message > "/dev/stderr"
+    print "Error: " message > STD_ERR
+    if (current_line + 0 > 0) print "  at line " current_line > STD_ERR
+    for (i = call_stack_size; i >= 1; i--) {
+        print "  in " call_stack[i, "name"] "() called from line " call_stack[i, "call_line"] > STD_ERR
+    }
     exit(1)
 }
 
 function init_error_handling() {
     error_occurred = 0
     last_exception = ""
+    thrown_value_id = ""
     current_exception_handler = ""
 }
 
@@ -3380,6 +4087,16 @@ function control_flow_active() {
 
 function advance_token() {
     current_token++
+}
+
+function get_current_line() {
+    if (current_token >= 1 && current_token <= total_tokens && (current_token in token_lines)) {
+        return token_lines[current_token] + 0
+    }
+    if (total_tokens >= 1 && (total_tokens in token_lines)) {
+        return token_lines[total_tokens] + 0
+    }
+    return 0
 }
 
 function get_token_type(   token_str, colon_pos) {
@@ -3441,32 +4158,175 @@ function shellquote(s) {
     return "'" s "'"
 }
 
-function execute_program(filename,   code, line, token_count, prog_node, result, start_time, end_time, time_diff) {
+function path_dirname(path,   d) {
+    d = path
+    if (sub(/\/[^\/]*$/, "", d) == 0) return "."
+    if (d == "") return "/"
+    return d
+}
+
+function path_basename(path,   b) {
+    b = path
+    sub(/^.*\//, "", b)
+    return b
+}
+
+function ensure_dir(dir) {
+    return system("mkdir -p " shellquote(dir) " 2>/dev/null")
+}
+
+function resolve_cache_path(filename,   cache_dir) {
+    cache_dir = path_dirname(filename) "/.awkward-cache"
+    if (ensure_dir(cache_dir) != 0) return ""
+    return cache_dir "/" path_basename(filename) AWKWARD_CACHE
+}
+
+function cache_escape(s,   out, i, n, c) {
+    out = ""
+    n = length(s)
+    for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c == "\\") out = out "\\\\"
+        else if (c == "\t") out = out "\\t"
+        else if (c == "\n") out = out "\\n"
+        else out = out c
+    }
+    return out
+}
+
+function cache_unescape(s,   out, i, n, c) {
+    out = ""
+    n = length(s)
+    for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c == "\\" && i < n) {
+            i++
+            c = substr(s, i, 1)
+            if (c == "n") out = out "\n"
+            else if (c == "t") out = out "\t"
+            else if (c == "\\") out = out "\\"
+            else out = out "\\" c
+        } else {
+            out = out c
+        }
+    }
+    return out
+}
+
+function save_ast_cache(cache_path, source_code, root_node,   idx, parts) {
+    print cache_escape(source_code) > cache_path
+    print ast_node_counter >> cache_path
+    print root_node >> cache_path
+    print cache_escape(dir_path) >> cache_path
+    for (idx in ast_nodes) {
+        split(idx, parts, SUBSEP)
+        print parts[1] "\t" parts[2] "\t" cache_escape(ast_nodes[idx]) >> cache_path
+    }
+    close(cache_path)
+}
+
+function load_ast_cache(cache_path, source_code,   cached_source, counter_line, root_line, dir_line,
+                         line, n, parts, node_id, field, value, ret) {
+    ret = (getline cached_source < cache_path)
+    if (ret <= 0) {
+        close(cache_path)
+        return ""
+    }
+    if (cache_unescape(cached_source) != source_code) {
+        close(cache_path)
+        return ""
+    }
+
+    if ((getline counter_line < cache_path) <= 0 ||
+        (getline root_line < cache_path) <= 0 ||
+        (getline dir_line < cache_path) <= 0) {
+        close(cache_path)
+        return ""
+    }
+
+    delete ast_nodes
+    while ((getline line < cache_path) > 0) {
+        n = split(line, parts, "\t")
+        if (n != 3) continue
+        node_id = parts[1]
+        field = parts[2]
+        value = cache_unescape(parts[3])
+        if ((value + 0) == value) value = value + 0
+        ast_nodes[node_id, field] = value
+    }
+    close(cache_path)
+
+    ast_node_counter = counter_line + 0
+    dir_path = cache_unescape(dir_line)
+    return root_line
+}
+
+function execute_program(filename,   code, line, token_count, prog_node, result, start_time, end_time, time_diff,
+                          use_cache, cache_path, cached_root, parse_start, parse_time, exec_start, exec_time) {
     if (debug) {
         start_time = _now()
-        debug_msg("Executing program from file " filename)
+        if (debug) debug_msg("Executing program from file " filename)
     }
 
     code = read_file(filename)
-    debug_msg("Read file, code length: " length(code))
+    if (debug) debug_msg("Read file, code length: " length(code))
 
-    token_count = tokenize(code)
-    debug_msg("Tokenized, token count: " token_count)
-    dir_path = realpath_dir(filename)
-    prog_node = parse(tokens, token_count)
-    debug_msg("Parsed, prog_node: " prog_node)
+    cache_path = resolve_cache_path(filename)
+    use_cache = (cache_path != "")
+    prog_node = ""
+    if (use_cache) {
+        cached_root = load_ast_cache(cache_path, code)
+        if (cached_root != "") {
+            if (debug) debug_msg("AST cache hit for " filename)
+            prog_node = cached_root
+        }
+    }
+
+    if (profile) parse_start = _now()
+    if (prog_node == "") {
+        token_count = tokenize(code)
+        if (debug) debug_msg("Tokenized, token count: " token_count)
+        dir_path = realpath_dir(filename)
+        prog_node = parse(tokens, token_count)
+        if (debug) debug_msg("Parsed, prog_node: " prog_node)
+        if (use_cache) save_ast_cache(cache_path, code, prog_node)
+    }
+    if (profile) parse_time = _now() - parse_start
+
+    if (profile) exec_start = _now()
     result = execute(prog_node)
+    if (profile) exec_time = _now() - exec_start
 
     if (debug) {
         end_time = _now()
         time_diff = end_time - start_time
 
-        debug_msg("Started executing program at: " sprintf("%.3f", start_time) " sec")
-        debug_msg("Ended executing program at: " sprintf("%.3f", end_time) " sec")
-        debug_msg("Finished executing program, time: " sprintf("%.3f", time_diff) " sec")
+        if (debug) debug_msg("Started executing program at: " sprintf("%.3f", start_time) " sec")
+        if (debug) debug_msg("Ended executing program at: " sprintf("%.3f", end_time) " sec")
+        if (debug) debug_msg("Finished executing program, time: " sprintf("%.3f", time_diff) " sec")
     }
 
+    if (profile) print_profile_report(filename, parse_time, exec_time)
+
     return result
+}
+
+function print_profile_report(filename, parse_time, exec_time,   node_type, avg_us, avg_us_no_gc) {
+    print "=== awkward profile: " filename " ===" > STD_ERR
+    print sprintf("parse:       %8.4fs", parse_time) > STD_ERR
+    print sprintf("execute:     %8.4fs", exec_time) > STD_ERR
+    print sprintf("  gc passes: %8d", prof_gc_count + 0) > STD_ERR
+    print sprintf("  gc time:   %8.4fs", prof_gc_time + 0) > STD_ERR
+    print sprintf("execute() calls: %d", prof_execute_calls + 0) > STD_ERR
+    if (prof_execute_calls > 0) {
+        avg_us = (exec_time / prof_execute_calls) * 1000000
+        avg_us_no_gc = ((exec_time - prof_gc_time) / prof_execute_calls) * 1000000
+        print sprintf("avg per call: %.2f us (%.2f us excluding gc)", avg_us, avg_us_no_gc) > STD_ERR
+    }
+    print "node type breakdown (execute() calls by AST node type):" > STD_ERR
+    for (node_type in prof_node_type_counts) {
+        print sprintf("  %-20s %d", node_type, prof_node_type_counts[node_type]) > STD_ERR
+    }
 }
 
 function init_operators() {

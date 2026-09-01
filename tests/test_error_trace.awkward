@@ -1,0 +1,4 @@
+fn a() { return b(); }
+fn b() { return c(); }
+fn c() { return 1 / 0; }
+print(a());

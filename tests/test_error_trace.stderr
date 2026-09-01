@@ -1,0 +1,5 @@
+Error: Division by zero
+  at line 3
+  in c() called from line 2
+  in b() called from line 1
+  in a() called from line 4

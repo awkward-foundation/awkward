@@ -31,7 +31,7 @@ function utf8_encode(code,   b1, b2, b3, b4) {
 }
 
 function create_http_module(obj_id, fun_id, methods, i) {
-    debug_msg("Creating http module")
+    if (debug) debug_msg("Creating http module")
     obj_id = create_object()
     objects[obj_id, "type"] = TYPE_STRUCT
     objects[obj_id, "struct_name"] = "http"
@@ -280,7 +280,7 @@ function http_request(method, url, body_id, headers_id,   counter, body_file, hd
     cmd = cmd " " shell_escape(url)
     cmd = cmd " 2>/dev/null"
 
-    debug_msg("HTTP " method " " url)
+    if (debug) debug_msg("HTTP " method " " url)
 
     status = ""
     cmd | getline status
@@ -370,222 +370,10 @@ function http_url_encode(s,   cmd, line, hex_str, parts, n, i, byte_val, c, out)
     return out
 }
 
-function http_json_parse(s,   val_id) {
-    json_src = s
-    json_pos = 1
-    json_len = length(s)
-    json_skip_ws()
-    if (json_pos > json_len) error("json_parse: empty input")
-    val_id = json_parse_value()
-    json_skip_ws()
-    if (json_pos <= json_len) error("json_parse: trailing data at position " json_pos)
-    return val_id
+function http_json_parse(s) {
+    return json_decode(s)
 }
 
-function json_skip_ws(   c) {
-    while (json_pos <= json_len) {
-        c = substr(json_src, json_pos, 1)
-        if (c == " " || c == "\t" || c == "\n" || c == "\r") json_pos++
-        else break
-    }
-}
-
-function json_parse_value(   c) {
-    json_skip_ws()
-    if (json_pos > json_len) error("json_parse: unexpected end of input")
-    c = substr(json_src, json_pos, 1)
-    if (c == "{") return json_parse_object()
-    if (c == "[") return json_parse_array()
-    if (c == "\"") return json_parse_string()
-    if (c == "t" || c == "f") return json_parse_bool()
-    if (c == "n") return json_parse_null()
-    if (c == "-" || (c >= "0" && c <= "9")) return json_parse_number()
-    error("json_parse: unexpected character '" c "' at position " json_pos)
-}
-
-function json_parse_object(   keys, values, count, key_id, val_id, c) {
-    json_pos++
-    count = 0
-    json_skip_ws()
-    if (substr(json_src, json_pos, 1) == "}") {
-        json_pos++
-        return create_object(keys, values, 0)
-    }
-    while (1) {
-        json_skip_ws()
-        if (substr(json_src, json_pos, 1) != "\"") error("json_parse: expected string key at position " json_pos)
-        key_id = json_parse_string()
-        json_skip_ws()
-        if (substr(json_src, json_pos, 1) != ":") error("json_parse: expected ':' at position " json_pos)
-        json_pos++
-        val_id = json_parse_value()
-        count++
-        keys[count] = objects[key_id, "value"]
-        values[count] = val_id
-        json_skip_ws()
-        c = substr(json_src, json_pos, 1)
-        if (c == ",") { json_pos++; continue }
-        if (c == "}") { json_pos++; break }
-        error("json_parse: expected ',' or '}' at position " json_pos)
-    }
-    return create_object(keys, values, count)
-}
-
-function json_parse_array(   element_ids, count, c) {
-    json_pos++
-    count = 0
-    json_skip_ws()
-    if (substr(json_src, json_pos, 1) == "]") {
-        json_pos++
-        return create_array(element_ids, 0)
-    }
-    while (1) {
-        element_ids[++count] = json_parse_value()
-        json_skip_ws()
-        c = substr(json_src, json_pos, 1)
-        if (c == ",") { json_pos++; continue }
-        if (c == "]") { json_pos++; break }
-        error("json_parse: expected ',' or ']' at position " json_pos)
-    }
-    return create_array(element_ids, count)
-}
-
-function json_parse_string(   out, c, next_c, hex, hex2, code, low) {
-    json_pos++
-    out = ""
-    while (json_pos <= json_len) {
-        c = substr(json_src, json_pos, 1)
-        if (c == "\"") {
-            json_pos++
-            return create_value(TYPE_STRING, out)
-        }
-        if (c == "\\") {
-            json_pos++
-            if (json_pos > json_len) error("json_parse: dangling backslash")
-            next_c = substr(json_src, json_pos, 1)
-            if (next_c == "\"") out = out "\""
-            else if (next_c == "\\") out = out "\\"
-            else if (next_c == "/") out = out "/"
-            else if (next_c == "b") out = out sprintf("%c", 8)
-            else if (next_c == "f") out = out sprintf("%c", 12)
-            else if (next_c == "n") out = out "\n"
-            else if (next_c == "r") out = out "\r"
-            else if (next_c == "t") out = out "\t"
-            else if (next_c == "u") {
-                if (json_pos + 4 > json_len) error("json_parse: invalid \\u escape")
-                hex = substr(json_src, json_pos + 1, 4)
-                code = hex_to_dec(hex)
-                json_pos += 4
-                if (code >= 55296 && code <= 56319) {
-                    if (substr(json_src, json_pos + 1, 2) != "\\u") error("json_parse: expected low surrogate")
-                    json_pos += 2
-                    if (json_pos + 4 > json_len) error("json_parse: invalid low surrogate")
-                    hex2 = substr(json_src, json_pos + 1, 4)
-                    low = hex_to_dec(hex2)
-                    json_pos += 4
-                    code = 65536 + (code - 55296) * 1024 + (low - 56320)
-                }
-                out = out utf8_encode(code)
-            }
-            else error("json_parse: invalid escape \\" next_c)
-            json_pos++
-        } else {
-            out = out c
-            json_pos++
-        }
-    }
-    error("json_parse: unterminated string")
-}
-
-function json_parse_number(   start, c, has_dot, has_e, num_str) {
-    start = json_pos
-    has_dot = 0
-    has_e = 0
-    if (substr(json_src, json_pos, 1) == "-") json_pos++
-    while (json_pos <= json_len) {
-        c = substr(json_src, json_pos, 1)
-        if (c >= "0" && c <= "9") {
-            json_pos++
-        } else if (c == "." && !has_dot && !has_e) {
-            has_dot = 1
-            json_pos++
-        } else if ((c == "e" || c == "E") && !has_e) {
-            has_e = 1
-            json_pos++
-            c = substr(json_src, json_pos, 1)
-            if (c == "+" || c == "-") json_pos++
-        } else {
-            break
-        }
-    }
-    num_str = substr(json_src, start, json_pos - start)
-    if (has_dot || has_e) return create_value(TYPE_FLOAT, num_str + 0)
-    return create_value(TYPE_INT, num_str + 0)
-}
-
-function json_parse_bool() {
-    if (substr(json_src, json_pos, 4) == "true") {
-        json_pos += 4
-        return create_value(TYPE_BOOL, 1)
-    }
-    if (substr(json_src, json_pos, 5) == "false") {
-        json_pos += 5
-        return create_value(TYPE_BOOL, 0)
-    }
-    error("json_parse: invalid literal at position " json_pos)
-}
-
-function json_parse_null() {
-    if (substr(json_src, json_pos, 4) == "null") {
-        json_pos += 4
-        return create_value(TYPE_NULL, "null")
-    }
-    error("json_parse: invalid literal at position " json_pos)
-}
-
-function http_json_stringify(val_id,   type, val, out, i, n, count, key, prop_val_id) {
-    type = objects[val_id, "type"]
-    if (type == TYPE_NULL)   return "null"
-    if (type == TYPE_BOOL)   return (objects[val_id, "value"] + 0) ? "true" : "false"
-    if (type == TYPE_INT)    return objects[val_id, "value"] ""
-    if (type == TYPE_FLOAT)  return objects[val_id, "value"] ""
-    if (type == TYPE_STRING) return json_escape_string(objects[val_id, "value"])
-    if (type == TYPE_ARRAY) {
-        n = objects[val_id, "length"]
-        out = "["
-        for (i = 0; i < n; i++) {
-            if (i > 0) out = out ","
-            out = out http_json_stringify(objects[val_id, "element_" i])
-        }
-        return out "]"
-    }
-    if (type == TYPE_OBJECT || type == TYPE_STRUCT) {
-        count = objects[val_id, "properties_count"] + 0
-        out = "{"
-        for (i = 1; i <= count; i++) {
-            if (i > 1) out = out ","
-            key = objects[val_id, "prop_key_" i]
-            prop_val_id = objects[val_id, "prop_value_" i]
-            out = out json_escape_string(key) ":" http_json_stringify(prop_val_id)
-        }
-        return out "}"
-    }
-    error("json_stringify: cannot stringify type " type)
-}
-
-function json_escape_string(s,   out, i, n, c, code) {
-    out = "\""
-    n = length(s)
-    for (i = 1; i <= n; i++) {
-        c = substr(s, i, 1)
-        if (c == "\"")      out = out "\\\""
-        else if (c == "\\") out = out "\\\\"
-        else if (c == "\n") out = out "\\n"
-        else if (c == "\r") out = out "\\r"
-        else if (c == "\t") out = out "\\t"
-        else if (c == "\b") out = out "\\b"
-        else if (c == "\f") out = out "\\f"
-        else                out = out c
-    }
-    return out "\""
+function http_json_stringify(val_id) {
+    return json_encode(val_id)
 }

@@ -1,6 +1,6 @@
 
 function create_fs_module(obj_id, fun_id, methods, i) {
-    debug_msg("Creating fs module")
+    if (debug) debug_msg("Creating fs module")
     obj_id = create_object()
     objects[obj_id, "type"] = TYPE_STRUCT
     objects[obj_id, "struct_name"] = "fs"
@@ -92,8 +92,7 @@ function builtin_fs(func_name, args, argc,   parts, path, cmd, result, line) {
     else if (parts[2] == "size") {
         if (argc != 1) error("size expects 1 argument")
         path = objects[args[1], "value"]
-        cmd = "stat -f %z " shell_escape(path) " 2>/dev/null || stat -c %s " shell_escape(path)
-        print "CMD: " cmd
+        cmd = "stat -c %s " shell_escape(path) " 2>/dev/null || stat -f %z " shell_escape(path) " 2>/dev/null"
         cmd | getline result
         close(cmd)
         return create_value(TYPE_INT, result)

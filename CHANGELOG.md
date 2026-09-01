@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-09-01
+
+### Added
+
+- AST caching
+- `--profile` flag
+- new errors report
+- typing lol
+
+### Fixed
+
+- a lot of things...
+
 ## [0.2.0] - 2026-08-02
 
 ### Added

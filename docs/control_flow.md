@@ -41,6 +41,20 @@ try {
 }
 ```
 
+## `throw_statement`
+
+Throws a value as an exception
+
+**Examples:**
+```awkward
+struct NotFoundError { message; };
+fn find(id) {
+  if (id != 1) { throw new NotFoundError{message="missing"}; }
+  return "found";
+}
+try { find(2); } catch (e) { print(e.message); }  # 404 missing
+```
+
 ## `return_statement`
 
 Return statement, optionally with an expression to return.

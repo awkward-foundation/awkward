@@ -113,11 +113,33 @@ let sum = reduce(arr, lambda acc, x: acc + x, 0)  # sum = 10
 
 ## `builtin_range`
 
-Creates an array containing a range of integers.
+Creates a lazy iterator over a range of integers
 
 **Examples:**
 ```awkward
-let arr = range(5)  # arr = [0, 1, 2, 3, 4]
-let arr2 = range(2, 6)  # arr2 = [2, 3, 4, 5]
+for (let i in range(5)) { print(i) }  # 0 1 2 3 4
+for (let i in range(2, 6)) { print(i) }  # 2 3 4 5
+```
+
+## `builtin_int`
+
+Explicit type conversion. int()/float() accept int, float, bool, or string
+
+**Examples:**
+```awkward
+int("42")    # 42
+float("3.5") # 3.5
+str(42)      # "42"
+```
+
+## `builtin_format`
+
+printf-style formatting up to 5 value args for now
+
+**Examples:**
+```awkward
+format("%.2f", 3.14159)      # "3.14"
+format("%5d", 3)             # "    3"
+format("%s is %d", "age", 9) # "age is 9"
 ```
 
