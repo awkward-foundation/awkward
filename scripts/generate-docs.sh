@@ -10,6 +10,9 @@ SRC_FILES=(
     "./lib/modules/regex.awk"
     "./lib/modules/kek.awk"
     "./lib/modules/mysql.awk"
+    "./lib/modules/json.awk"
+    "./lib/modules/argparse.awk"
+    "./lib/modules/stdin.awk"
 )
 OUT_DIR="./docs"
 

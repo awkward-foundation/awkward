@@ -27,7 +27,7 @@ print("Value:", value, "is of type", type(value))  # prints value and its type
 
 ## `builtin_type`
 
-Returns the type of the given value as a string.
+Returns the type of the given value as a string
 
 **Examples:**
 ```awkward
@@ -35,6 +35,10 @@ type(42)  # returns "int"
 type(3.14)  # returns "float"
 type("hello")  # returns "string"
 type([1, 2, 3])  # returns "array"
+struct Product { name; };
+enum Status { Active, Inactive };
+type(new Product{name="x"})  # "Product"
+type(Status.Active)          # "Status"
 ```
 
 ## `builtin_len`

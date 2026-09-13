@@ -8,6 +8,13 @@ AWKWARD=../awkward
 TEST_DIR=$(dirname "$0")
 cd "$TEST_DIR" || exit 1
 
+DEBUG_FLAG=""
+for arg in "$@"; do
+    if [ "$arg" = "--debug" ]; then
+        DEBUG_FLAG="--debug"
+    fi
+done
+
 total=0
 passed=0
 
@@ -33,9 +40,9 @@ for src in test_*.awkward; do
     stderr_out=$(mktemp)
 
     if [ -f "$name.stdin" ]; then
-        "$AWKWARD" "$src" <"$name.stdin" >"$stdout_out" 2>"$stderr_out"
+        "$AWKWARD" "$src" $DEBUG_FLAG <"$name.stdin" >"$stdout_out" 2>"$stderr_out"
     else
-        "$AWKWARD" "$src" </dev/null >"$stdout_out" 2>"$stderr_out"
+        "$AWKWARD" "$src" $DEBUG_FLAG </dev/null >"$stdout_out" 2>"$stderr_out"
     fi
     exit_code=$?
 
@@ -51,7 +58,11 @@ for src in test_*.awkward; do
         fi
     fi
 
-    if [ -f "$name.stderr" ]; then
+    if [ -n "$DEBUG_FLAG" ]; then
+        if [ -s "$stderr_out" ]; then
+            cat "$stderr_out"
+        fi
+    elif [ -f "$name.stderr" ]; then
         if ! diff -u "$name.stderr" "$stderr_out" >/dev/null; then
             echo "stderr differs"
             diff -u "$name.stderr" "$stderr_out"

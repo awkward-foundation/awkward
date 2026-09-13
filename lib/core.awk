@@ -39,7 +39,7 @@ function debug_msg(msg) {
 }
 
 function init_interpreter() {
-    VERSION = "0.3.0"
+    VERSION = "0.3.1"
 
     if (debug) debug_msg("Initializing awkward interpreter version " VERSION)
 
@@ -607,14 +607,20 @@ function execute_struct_declaration(struct_node,   struct_name, struct_id) {
 }
 
 # @doc [structs]
-# Creates a struct object from its definition node.
+# Creates a struct object from its definition node. Fields are optional
 # examples:
 # struct Point {
-#   x;
-#   y;
+#   x: int;
+#   y: int;
 # };
 # let p = new Point{x=10, y=20};
-# print(p.x);  # prints 10
+# print(p.x);  # 10
+#
+# struct Point3D extends Point {
+#   z: int;
+# };
+# let p3 = new Point3D{x=1, y=2, z=3};
+# print(p3.x, p3.z);  # inherited field + own field
 function create_struct(struct_def_id,   struct_id, parent_name) {
     if (debug) debug_msg("Creating struct from definition node " struct_def_id)
     struct_id = ++object_counter
@@ -756,11 +762,14 @@ function execute_continue_statement(continue_node) {
 }
 
 # @doc [variables]
-# Variable declaration, optionally with an initializer.
+# Variable declaration, optionally with an initializer and a type annotation
 # examples:
-# let x;
-# let y = 42;
-# const pi = 3.14;
+# let x;                      # untyped, defaults to null
+# let y = 42;                 # untyped, inferred at runtime only
+# let count: int = 0;
+# let note: ?string;          # nullable
+# let name: string;           # error! no initializer, defaults to null
+# count = "kek";             # runtime error: count is declared int
 function parse_variable_declaration(   var_node) {
     if (debug) debug_msg("Parsing variable declaration")
     var_node = ++ast_node_counter
@@ -1986,6 +1995,16 @@ function call_builtin(func_name, args, argc) {
 # str.len()    # returns 5
 # let str = "hello, world";
 # str.split(",")    # returns [hello, world]
+# let padded = "  Hello, World!  ";
+# padded.trim()                   # "Hello, World!"
+# padded.trim().contains("World") # true
+# padded.trim().index_of("World") # 7
+# padded.trim().starts_with("Hello")  # true
+# padded.trim().ends_with("!")        # true
+# padded.trim().replace("World", "dude")  # "Hello, dude!"
+# padded.trim().slice(0, 5)      # "Hello"
+# "abc".reverse()                 # "cba"
+# "ab".repeat(3)                  # "ababab"
 function builtin_string(func_name, args, argc,  self_id, self_value, result, i, pos, needle, n, start, stop) {
     if (debug) debug_msg("Executing builtin string method " func_name " with " argc " arguments")
     self_id = args[0]
@@ -2116,6 +2135,17 @@ function builtin_function(func_name, args, argc,  self_id, self_value) {
 # let it = range(3);
 # it.next();  # 0
 # it.next();  # 1
+#
+# struct Countdown { current; };
+# impl Countdown {
+#   fn next() {
+#     if (self.current <= 0) { return null; }
+#     let v = self.current;
+#     self.current = self.current - 1;
+#     return v;
+#   }
+# }
+# for (let n in new Countdown{current=3}) { print(n); }  # 3 2 1
 function builtin_iterator(func_name, args, argc,   self_id, kind, cur, end) {
     if (debug) debug_msg("Executing builtin iterator method " func_name " with " argc " arguments")
     self_id = args[0]
@@ -2138,12 +2168,19 @@ function builtin_iterator(func_name, args, argc,   self_id, kind, cur, end) {
 }
 
 # @doc [arrays]
-# Built-in methods for array objects.
+# Built-in methods for array objects
 # examples:
 # let arr = [1, 2, 3]
 # arr.len()  # returns 3
 # arr.append(4)  # appends 4 to the array
-# arr.extend([5, 6])  # extends the array with another array    
+# arr.extend([5, 6])  # extends the array with another array
+# let scores = [3, 1, 2];
+# scores.sort()               # [1, 2, 3] (new array)
+# scores.reverse()            # [2, 1, 3]
+# scores.contains(2)          # true
+# scores.index_of(2)          # 2
+# scores.slice(0, 2)          # [3, 1]
+# scores.join("-")            # "3-1-2"
 function builtin_array(func_name, args, argc,  self_id, self_value, i, len, value_id, value_type, value_len,
                         new_elems, start, stop, sep, result_str) {
     if (debug) debug_msg("Executing builtin array method " func_name " with " argc " arguments")
@@ -2316,27 +2353,21 @@ function builtin_print(args, argc,   i, output) {
 }
 
 # @doc [builtins]
-# Returns the type of the given value as a string.
+# Returns the type of the given value as a string
 # examples:
 # type(42)  # returns "int"
 # type(3.14)  # returns "float"
 # type("hello")  # returns "string"
 # type([1, 2, 3])  # returns "array"
-function builtin_type(args, argc,   arg_type, val_id, proto_id) {
+# struct Product { name; };
+# enum Status { Active, Inactive };
+# type(new Product{name="x"})  # "Product"
+# type(Status.Active)          # "Status"
+function builtin_type(args, argc) {
     if (debug) debug_msg("Executing builtin type with " argc " arguments")
     if (argc != 1) error("type expects 1 argument")
-    val_id = args[1]
-    arg_type = objects[val_id, "type"]
 
-    if (arg_type == TYPE_STRUCT) {
-        proto_id = objects[val_id, "prototype"]
-        if (proto_id != "") return create_value(TYPE_STRING, objects[proto_id, "struct_name"])
-        if (objects[val_id, "struct_name"] != "") return create_value(TYPE_STRING, objects[val_id, "struct_name"])
-    } else if (arg_type == TYPE_ENUM) {
-        return create_value(TYPE_STRING, objects[val_id, "enum_name"])
-    }
-
-    return create_value(TYPE_STRING, arg_type)
+    return create_value(TYPE_STRING, objects[args[1], "type"])
 }
 
 # @doc [builtins]
@@ -2902,12 +2933,19 @@ function parse_try_statement(   try_node) {
 # @doc [control_flow]
 # Throws a value as an exception
 # examples:
-# struct NotFoundError { message; };
+# struct AppError { message: string; };
+# struct NotFoundError extends AppError { code: int; };
+#
 # fn find(id) {
-#   if (id != 1) { throw new NotFoundError{message="missing"}; }
+#   if (id != 1) { throw new NotFoundError{message="missing", code=404}; }
 #   return "found";
 # }
-# try { find(2); } catch (e) { print(e.message); }  # 404 missing
+#
+# try {
+#   find(2);
+# } catch (e) {
+#   print(e.code, e.message);  # 404 missing
+# }
 function parse_throw_statement(   throw_node) {
     if (debug) debug_msg("Parsing throw statement")
     throw_node = ++ast_node_counter
@@ -3542,13 +3580,21 @@ function to_bool(val_id,   type, val) {
 }
 
 # @doc [functions]
-# Declares a function with a name and parameters.
+# Declares a function with a name and parameters. Params and the return
+# value can each carry an optional type annotation (`?Type` for nullable),
 # examples:
 # fn add(a, b) {
 #     return a + b;
 # }
 # fn greet(name) {
 #     print("Hello, " + name);
+# }
+# fn square(x: int): int {
+#     return x * x;
+# }
+# fn find_user(id: int): ?string {
+#     if (id != 1) { return null; }
+#     return "Alice";
 # }
 function parse_function_declaration(   func_node, param_idx) {
     if (debug) debug_msg("Parsing function declaration")

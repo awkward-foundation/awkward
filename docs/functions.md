@@ -36,7 +36,8 @@ fn external() {
 
 ## `function_declaration`
 
-Declares a function with a name and parameters.
+Declares a function with a name and parameters. Params and the return
+value can each carry an optional type annotation (`?Type` for nullable),
 
 **Examples:**
 ```awkward
@@ -45,6 +46,13 @@ fn add(a, b) {
 }
 fn greet(name) {
     print("Hello, " + name);
+}
+fn square(x: int): int {
+    return x * x;
+}
+fn find_user(id: int): ?string {
+    if (id != 1) { return null; }
+    return "Alice";
 }
 ```
 

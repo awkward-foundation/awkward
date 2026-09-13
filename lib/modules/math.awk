@@ -55,10 +55,18 @@ function call_math(func_name, arg, arg2,    result) {
 }
 
 # @doc [math]
-# Built-in math functions.
+# Built-in math functions and constants
 # examples:
-# math.sin(x)  # returns the sine of x (x in radians)
-# math.cos(x)  # returns the cosine of x (x in radians)
+# math.sin(x)  # returns the sine of x
+# math.cos(x)  # returns the cosine of x
+# math.floor(2.7)   # 2
+# math.ceil(2.1)    # 3
+# math.round(2.5)   # 3
+# math.min(3, 7)    # 3
+# math.max(3, 7)    # 7
+# math.random()     # a float in [0, 1)
+# math.PI           # 3.14159...
+# math.E            # 2.71828...
 function builtin_math(func_name, args, argc,   parts, result, arg, arg_type, arg1_type, arg2_type, v1, v2, winner) {
     if (debug) debug_msg("Executing builtin math function " func_name " with " argc " arguments")
     split(func_name, parts, ".")

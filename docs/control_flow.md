@@ -47,12 +47,19 @@ Throws a value as an exception
 
 **Examples:**
 ```awkward
-struct NotFoundError { message; };
+struct AppError { message: string; };
+struct NotFoundError extends AppError { code: int; };
+
 fn find(id) {
-  if (id != 1) { throw new NotFoundError{message="missing"}; }
+  if (id != 1) { throw new NotFoundError{message="missing", code=404}; }
   return "found";
 }
-try { find(2); } catch (e) { print(e.message); }  # 404 missing
+
+try {
+  find(2);
+} catch (e) {
+  print(e.code, e.message);  # 404 missing
+}
 ```
 
 ## `return_statement`
