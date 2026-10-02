@@ -199,6 +199,8 @@ function json_parse_array_value(   elems, count, val) {
         val = json_parse_value()
         count++
         elems[count] = val
+        eval_protect_count++
+        eval_protect_stack[eval_protect_count] = val
         json_skip_ws()
         if (json_peek() == ",") { JSON_POS++; continue }
         break
@@ -208,7 +210,7 @@ function json_parse_array_value(   elems, count, val) {
     return create_array(elems, count)
 }
 
-function json_parse_object_value(   keys, vals, count, key) {
+function json_parse_object_value(   keys, vals, count, key, val) {
     JSON_POS++
     count = 0
     json_skip_ws()
@@ -220,7 +222,10 @@ function json_parse_object_value(   keys, vals, count, key) {
         JSON_POS++ # skip
         count++
         keys[count] = key
-        vals[count] = json_parse_value()
+        val = json_parse_value()
+        vals[count] = val
+        eval_protect_count++
+        eval_protect_stack[eval_protect_count] = val
         json_skip_ws()
         if (json_peek() == ",") { JSON_POS++; continue }
         break

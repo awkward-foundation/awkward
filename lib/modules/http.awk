@@ -1,35 +1,4 @@
 
-function hex_to_dec(hex,   i, c, n, v) {
-    n = 0
-    for (i = 1; i <= length(hex); i++) {
-        c = tolower(substr(hex, i, 1))
-        v = index("0123456789abcdef", c) - 1
-        n = n * 16 + v
-    }
-    return n
-}
-
-function utf8_encode(code,   b1, b2, b3, b4) {
-    if (code <= 127) {
-        return sprintf("%c", code)
-    } else if (code <= 2047) {
-        b1 = 192 + int(code / 64)
-        b2 = 128 + (code % 64)
-        return sprintf("%c%c", b1, b2)
-    } else if (code <= 65535) {
-        b1 = 224 + int(code / 4096)
-        b2 = 128 + (int(code / 64) % 64)
-        b3 = 128 + (code % 64)
-        return sprintf("%c%c%c", b1, b2, b3)
-    } else {
-        b1 = 240 + int(code / 262144)
-        b2 = 128 + (int(code / 4096) % 64)
-        b3 = 128 + (int(code / 64) % 64)
-        b4 = 128 + (code % 64)
-        return sprintf("%c%c%c%c", b1, b2, b3, b4)
-    }
-}
-
 function create_http_module(obj_id, fun_id, methods, i) {
     if (debug) debug_msg("Creating http module")
     obj_id = create_object()

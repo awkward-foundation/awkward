@@ -1054,8 +1054,8 @@ function execute(node_id,   node_type, result) {
     return result
 }
 
-function clear_eval_protection() {
-    eval_protect_count = 0
+function clear_eval_protection(mark) {
+    if (eval_protect_count > mark) eval_protect_count = mark
 }
 
 function execute_member_expression(member_node,   obj_val_id, prop_val_id, type, method_id, property_name, prop_type) {
@@ -1427,6 +1427,7 @@ function call_lambda(lambda_id, args, argc,   param_count, i, body_node, old_sco
     }
 
     call_stack[++call_stack_size, "scope"] = current_scope_id
+    call_stack[call_stack_size, "caller_scope"] = old_scope
     call_stack[call_stack_size, "name"] = "<lambda>"
     call_stack[call_stack_size, "call_line"] = current_line
     saved_current_line = current_line
@@ -1449,15 +1450,16 @@ function resolve_identifier(id_name) {
     return get_variable(id_name)
 }
 
-function execute_program_node(prog_node,   result_id, i, stmt_node) {
+function execute_program_node(prog_node,   result_id, i, stmt_node, protect_mark) {
     if (debug) debug_msg("Executing program node")
     result_id = create_value(TYPE_NULL, "null")
+    protect_mark = eval_protect_count
 
     for (i = 1; i <= ast_nodes[prog_node, "body_count"]; i++) {
         stmt_node = ast_nodes[prog_node, "body_" i]
         if (ast_nodes[stmt_node, "line"] != "") current_line = ast_nodes[stmt_node, "line"]
         result_id = execute(stmt_node)
-        clear_eval_protection()
+        clear_eval_protection(protect_mark)
 
         if (control_flow_active()) {
             break
@@ -1581,6 +1583,7 @@ function mark_reachable_objects(   i) {
     for (i = 1; i <= call_stack_size; i++) {
         mark_scope_objects(call_stack[i, "scope"])
         if (debug) debug_msg("Marked scope " call_stack[i, "scope"] " from call stack")
+        if (call_stack[i, "caller_scope"] != "") mark_scope_chain(call_stack[i, "caller_scope"])
     }
 
     mark_scope_chain(current_scope_id)
@@ -1619,6 +1622,13 @@ function mark_object(id,   type, i, sub_id, j, prop_count, closure_scope_id) {
             if (sub_id + 0 == sub_id) mark_object(sub_id)
         }
         sub_id = objects[id, "prototype"]
+        if (sub_id + 0 == sub_id) mark_object(sub_id)
+
+        for (j = 1; j <= objects[id, "methods_count"] + 0; j++) {
+            sub_id = objects[id, "method_" j]
+            if (sub_id + 0 == sub_id) mark_object(sub_id)
+        }
+        sub_id = objects[id, "parent"]
         if (sub_id + 0 == sub_id) mark_object(sub_id)
     } else if (type == TYPE_FUNCTION) {
         sub_id = objects[id, "self"]
@@ -2707,6 +2717,8 @@ function create_instance(type_id, constructor_args, argc,   inst_id, i, j, prop_
     objects[inst_id, "type"] = TYPE_STRUCT
     objects[inst_id, "properties_count"] = 0
     objects[inst_id, "prototype"] = type_id
+    eval_protect_count++
+    eval_protect_stack[eval_protect_count] = inst_id
     if (objects[type_id, "type"] == TYPE_STRUCT) {
         if (argc != 1 || ast_nodes[constructor_args[1], "type"] != "ObjectExpression") {
             error("Struct instantiation requires a single object literal argument")
@@ -2719,6 +2731,7 @@ function create_instance(type_id, constructor_args, argc,   inst_id, i, j, prop_
             prop_value = execute(ast_nodes[prop_node, "value"])
             objects[inst_id, "prop_key_" i] = prop_name
             objects[inst_id, "prop_value_" i] = prop_value
+            objects[inst_id, "properties_count"] = i
         }
         count = prop_count
 
@@ -2741,6 +2754,7 @@ function create_instance(type_id, constructor_args, argc,   inst_id, i, j, prop_
                     count++
                     objects[inst_id, "prop_key_" count] = def_name
                     objects[inst_id, "prop_value_" count] = create_value(TYPE_NULL, "null")
+                    objects[inst_id, "properties_count"] = count
                     if (def_type != "") check_declared_type(objects[inst_id, "prop_value_" count], def_type, def_nullable, def_name)
                 }
             }
@@ -3265,19 +3279,20 @@ function parse_block_statement(   block_node, stmt_node) {
     return block_node
 }
 
-function execute_block_statement(block_node,   old_scope_id, result_id, i, n, stmt_node) {
+function execute_block_statement(block_node,   old_scope_id, result_id, i, n, stmt_node, protect_mark) {
     if (debug) debug_msg("Executing block statement")
     old_scope_id = current_scope_id
     current_scope_id = new_scope(current_scope_id)
 
     result_id = create_value(TYPE_NULL, "null")
     n = ast_nodes[block_node, "body_count"]
+    protect_mark = eval_protect_count
 
     for (i = 1; i <= n; i++) {
         stmt_node = ast_nodes[block_node, "body_" i]
         if (ast_nodes[stmt_node, "line"] != "") current_line = ast_nodes[stmt_node, "line"]
         result_id = execute(stmt_node)
-        clear_eval_protection()
+        clear_eval_protection(protect_mark)
         if (return_value_set || break_flag || continue_flag || error_occurred)
             break
     }
@@ -3438,16 +3453,17 @@ function parse_for_statement(   for_node) {
     return for_node
 }
 
-function execute_while_statement(while_node,   test_id, body_id, test_val_id, result_id) {
+function execute_while_statement(while_node,   test_id, body_id, test_val_id, result_id, protect_mark) {
     if (debug) debug_msg("Executing while statement")
     result_id = create_value(TYPE_NULL, "null")
     test_id = ast_nodes[while_node, "test"]
     body_id = ast_nodes[while_node, "body"]
+    protect_mark = eval_protect_count
     while (1) {
         test_val_id = execute(test_id)
         if (!to_bool(test_val_id)) break
         result_id = execute(body_id)
-        clear_eval_protection()
+        clear_eval_protection(protect_mark)
         if (control_flow_active()) {
             if (continue_flag) {
                 continue_flag = 0
@@ -3465,7 +3481,7 @@ function execute_while_statement(while_node,   test_id, body_id, test_val_id, re
 
 function execute_for_in_statement(for_node,   var_name, iterable_node, iterable_val_id,
                                   body_node, result_id, i, var_id, parent_scope_id, loop_scope_id,
-                                  next_method_id, next_args, next_result) {
+                                  next_method_id, next_args, next_result, protect_mark) {
     if (debug) debug_msg("Executing for-in statement")
 
     result_id = create_value(TYPE_NULL, "null")
@@ -3500,6 +3516,8 @@ function execute_for_in_statement(for_node,   var_name, iterable_node, iterable_
     declare_variable(var_name, var_id)
     current_scope_id = old_scope_id
 
+    protect_mark = eval_protect_count
+
     if (next_method_id != "") {
         current_scope_id = loop_scope_id
         while (1) {
@@ -3509,7 +3527,7 @@ function execute_for_in_statement(for_node,   var_name, iterable_node, iterable_
             update_variable(var_name, next_result)
             if (debug) debug_msg("Iterating via next() -> " next_result)
             execute(body_node)
-            clear_eval_protection()
+            clear_eval_protection(protect_mark)
             if (control_flow_active()) {
                 if (continue_flag) {
                     continue_flag = 0
@@ -3529,7 +3547,7 @@ function execute_for_in_statement(for_node,   var_name, iterable_node, iterable_
             objects[var_id, "value"] = i
             current_scope_id = loop_scope_id
             execute(body_node)
-            clear_eval_protection()
+            clear_eval_protection(protect_mark)
             current_scope_id = parent_scope_id
             if (control_flow_active()) {
                 if (continue_flag) {
@@ -3549,7 +3567,7 @@ function execute_for_in_statement(for_node,   var_name, iterable_node, iterable_
             objects[var_id, "value"] = objects[iterable_val_id, "prop_key_" i]
             current_scope_id = loop_scope_id
             execute(body_node)
-            clear_eval_protection()
+            clear_eval_protection(protect_mark)
             current_scope_id = parent_scope_id
             if (control_flow_active()) {
                 if (continue_flag) {
@@ -3659,8 +3677,9 @@ function execute_function_declaration(func_node,   func_name, func_id) {
     return create_value(TYPE_NULL, "null")
 }
 
-function call_function(func_id, args, argc,   func_def, closure_scope, old_scope_id, i, param_name, arg_val, body_id, result_id, old_return_value_set, old_return_value, body_count, bi, func_name, saved_current_line, stmt_node) {
+function call_function(func_id, args, argc,   func_def, closure_scope, old_scope_id, i, param_name, arg_val, body_id, result_id, old_return_value_set, old_return_value, body_count, bi, func_name, saved_current_line, stmt_node, protect_mark) {
     if (debug) debug_msg("Calling function with id " func_id)
+    protect_mark = eval_protect_count
     func_def = objects[func_id, "definition"]
     closure_scope = objects[func_id, "closure_scope"]
     old_scope_id = current_scope_id
@@ -3681,6 +3700,7 @@ function call_function(func_id, args, argc,   func_def, closure_scope, old_scope
     func_name = objects[func_id, "name"]
     if (func_name == "") func_name = "<anonymous>"
     call_stack[++call_stack_size, "scope"] = current_scope_id
+    call_stack[call_stack_size, "caller_scope"] = old_scope_id
     call_stack[call_stack_size, "name"] = func_name
     call_stack[call_stack_size, "call_line"] = current_line
     saved_current_line = current_line
@@ -3695,7 +3715,7 @@ function call_function(func_id, args, argc,   func_def, closure_scope, old_scope
             stmt_node = ast_nodes[body_id, "body_" bi]
             if (ast_nodes[stmt_node, "line"] != "") current_line = ast_nodes[stmt_node, "line"]
             result_id = execute(stmt_node)
-            clear_eval_protection()
+            clear_eval_protection(protect_mark)
             if (return_value_set || break_flag || continue_flag || error_occurred)
                 break
         }
@@ -4202,6 +4222,37 @@ function realpath_dir(filename,   abs, dir) {
 function shellquote(s) {
     gsub(/'/, "'\\''", s)
     return "'" s "'"
+}
+
+function hex_to_dec(hex,   i, c, n, v) {
+    n = 0
+    for (i = 1; i <= length(hex); i++) {
+        c = tolower(substr(hex, i, 1))
+        v = index("0123456789abcdef", c) - 1
+        n = n * 16 + v
+    }
+    return n
+}
+
+function utf8_encode(code,   b1, b2, b3, b4) {
+    if (code <= 127) {
+        return sprintf("%c", code)
+    } else if (code <= 2047) {
+        b1 = 192 + int(code / 64)
+        b2 = 128 + (code % 64)
+        return sprintf("%c%c", b1, b2)
+    } else if (code <= 65535) {
+        b1 = 224 + int(code / 4096)
+        b2 = 128 + (int(code / 64) % 64)
+        b3 = 128 + (code % 64)
+        return sprintf("%c%c%c", b1, b2, b3)
+    } else {
+        b1 = 240 + int(code / 262144)
+        b2 = 128 + (int(code / 4096) % 64)
+        b3 = 128 + (int(code / 64) % 64)
+        b4 = 128 + (code % 64)
+        return sprintf("%c%c%c%c", b1, b2, b3, b4)
+    }
 }
 
 function path_dirname(path,   d) {
